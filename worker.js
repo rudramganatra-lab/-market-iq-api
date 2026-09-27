@@ -1,4 +1,4 @@
-const CORS={"Access-Control-Allow-Origin":"*","Access-Control-Allow-Methods":"GET,POST,OPTIONS","Access-Control-Allow-Headers":"Content-Type"};
+const CORS={"Access-Control-Allow-Origin":"*","Access-Control-Allow-Methods":"GET,POST,OPTIONS","Access-Control-Allow-Headers":"Content-Type, Authorization"};
 const START_CASH=1000000;
 const CANDLE_MS=60000;
 const MAX_CANDLES=500;
@@ -120,6 +120,22 @@ export class MarketState{
       return json({ok:true,order:o,cash:s.cash,positions:s.positions});
     }
     if(u.pathname==="/api/reset"&&req.method==="POST"){ await this.put(seed()); return json({ok:true,reset:true}); }
+    if(u.pathname==="/api/seed-demo"&&req.method==="POST"){
+      const now=Date.now();
+      for(let k in I){
+        let p=I[k].price*(0.9+Math.random()*0.2);
+        const intraday=[]; const start=now-390*CANDLE_MS;
+        for(let i=0;i<390;i++){ const o=p; p=Math.max(.01,p*(1+(Math.random()-.5)*.003)); const h=Math.max(o,p)*(1+Math.random()*.001), l=Math.min(o,p)*(1-Math.random()*.001); intraday.push({t:start+i*CANDLE_MS,o,h,l,c:p,v:Math.round(Math.random()*15000+2000)}); }
+        s.candles[k]=intraday;
+        s.prices[k]=p;
+        s.dayOpen[k]=intraday[0].o; s.dayHigh[k]=Math.max(...intraday.map(c=>c.h)); s.dayLow[k]=Math.min(...intraday.map(c=>c.l)); s.dayVol[k]=intraday.reduce((a,c)=>a+c.v,0);
+        const daily=[]; let dp=I[k].price*(0.85+Math.random()*0.3);
+        for(let d=60;d>=1;d--){ const o=dp; dp=Math.max(.01,dp*(1+(Math.random()-.5)*.02)); const h=Math.max(o,dp)*(1+Math.random()*.01), l=Math.min(o,dp)*(1-Math.random()*.01); daily.push({t:now-d*86400000,o,h,l,c:dp,v:Math.round(Math.random()*2000000+300000)}); }
+        s.dailyCandles[k]=daily;
+      }
+      s.updatedAt=now; await this.put(s);
+      return json({ok:true,seeded:true});
+    }
     return json({ok:false,error:"Not found"},404);
   }
 }
@@ -128,11 +144,61 @@ export default{
   async fetch(req,env){
     if(req.method==="OPTIONS")return new Response(null,{headers:CORS});
     let url=new URL(req.url);
+
+    // ---- Auth endpoints (use USERS_KV, not Durable Object) ----
+    if(url.pathname==="/api/auth/signup"&&req.method==="POST"){
+      let b; try{b=await req.json()}catch{return json({ok:false,error:"Invalid JSON"},400)};
+      let username=String(b.username||"").trim().toLowerCase();
+      let password=String(b.password||"");
+      if(!/^[a-z0-9_]{3,20}$/.test(username)) return json({ok:false,error:"Username must be 3-20 chars: letters, numbers, underscore only"},400);
+      if(password.length<6) return json({ok:false,error:"Password must be at least 6 characters"},400);
+      const existing=await env.USERS_KV.get("user:"+username);
+      if(existing) return json({ok:false,error:"Username already taken"},400);
+      const salt=crypto.randomUUID();
+      const hash=await hashPassword(password,salt);
+      await env.USERS_KV.put("user:"+username, JSON.stringify({hash,salt,createdAt:Date.now()}));
+      const token=crypto.randomUUID();
+      await env.USERS_KV.put("session:"+token, username, {expirationTtl:60*60*24*30});
+      return json({ok:true,token,username});
+    }
+    if(url.pathname==="/api/auth/login"&&req.method==="POST"){
+      let b; try{b=await req.json()}catch{return json({ok:false,error:"Invalid JSON"},400)};
+      let username=String(b.username||"").trim().toLowerCase();
+      let password=String(b.password||"");
+      const raw=await env.USERS_KV.get("user:"+username);
+      if(!raw) return json({ok:false,error:"Invalid username or password"},400);
+      const rec=JSON.parse(raw);
+      const hash=await hashPassword(password,rec.salt);
+      if(hash!==rec.hash) return json({ok:false,error:"Invalid username or password"},400);
+      const token=crypto.randomUUID();
+      await env.USERS_KV.put("session:"+token, username, {expirationTtl:60*60*24*30});
+      return json({ok:true,token,username});
+    }
+    if(url.pathname==="/api/auth/me"&&req.method==="GET"){
+      const username=await resolveUser(req,env);
+      if(!username) return json({ok:false,error:"Not logged in"},401);
+      return json({ok:true,username});
+    }
+
+    // ---- Game endpoints (require session) ----
     if(url.pathname.startsWith("/api/")){
-      let uid=url.searchParams.get("uid")||"guest";
-      let id=env.MARKET_STATE.idFromName("player-"+uid);
+      const username=await resolveUser(req,env);
+      if(!username) return json({ok:false,error:"Not logged in"},401);
+      let id=env.MARKET_STATE.idFromName("player-"+username);
       return env.MARKET_STATE.get(id).fetch(req);
     }
     return new Response("MarketIQ API server is running.",{headers:CORS});
   }
+}
+
+async function hashPassword(password,salt){
+  const data=new TextEncoder().encode(salt+":"+password);
+  const buf=await crypto.subtle.digest("SHA-256",data);
+  return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,"0")).join("");
+}
+async function resolveUser(req,env){
+  const auth=req.headers.get("Authorization")||"";
+  const token=auth.startsWith("Bearer ")?auth.slice(7):null;
+  if(!token) return null;
+  return await env.USERS_KV.get("session:"+token);
 }
