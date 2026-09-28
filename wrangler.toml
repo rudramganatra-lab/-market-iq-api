@@ -2,7 +2,7 @@ name = "market-iq-api"
 main = "worker.js"
 compatibility_date = "2026-09-25"
 
-[[durable_objects.bindings]]
+[durable_objects]
 bindings = [{ name = "MARKET_STATE", class_name = "MarketState" }]
 
 [[migrations]]
