@@ -64,8 +64,9 @@ function tickOne(s,k){
 
 function advance(s){
   if(!s.candles || !s.dailyCandles || !s.dayVol){
-    const fresh=seed();
-    s=Object.assign(fresh, {cash:s.cash, positions:s.positions, orders:s.orders});
+    s=repairState(s);
+  } else {
+    s=repairState(s);
   }
   rolloverDayIfNeeded(s);
   let n=Date.now(), steps=Math.min(40,Math.floor(Math.max(0,n-s.updatedAt)/2500));
@@ -74,9 +75,47 @@ function advance(s){
   return s;
 }
 
+
+function validCandle(c){
+  return c && Number.isFinite(Number(c.t)) && Number.isFinite(Number(c.o)) &&
+    Number.isFinite(Number(c.h)) && Number.isFinite(Number(c.l)) &&
+    Number.isFinite(Number(c.c));
+}
+function validSeries(a){
+  return Array.isArray(a) && a.length>0 && a.every(validCandle);
+}
+function repairState(s){
+  const fresh=seed();
+  const repaired={
+    cash:Number.isFinite(Number(s.cash))?Number(s.cash):fresh.cash,
+    positions:s.positions&&typeof s.positions==="object"?s.positions:{},
+    orders:Array.isArray(s.orders)?s.orders:[],
+    prices:s.prices&&typeof s.prices==="object"?s.prices:fresh.prices,
+    dayOpen:s.dayOpen&&typeof s.dayOpen==="object"?s.dayOpen:fresh.dayOpen,
+    dayHigh:s.dayHigh&&typeof s.dayHigh==="object"?s.dayHigh:fresh.dayHigh,
+    dayLow:s.dayLow&&typeof s.dayLow==="object"?s.dayLow:fresh.dayLow,
+    dayVol:s.dayVol&&typeof s.dayVol==="object"?s.dayVol:fresh.dayVol,
+    candles:{},
+    dailyCandles:{},
+    lastDay:s.lastDay||fresh.lastDay,
+    updatedAt:Number.isFinite(Number(s.updatedAt))?Number(s.updatedAt):Date.now()
+  };
+  for(const k in I){
+    repaired.candles[k]=validSeries(s.candles&&s.candles[k]) ? s.candles[k].map(c=>({...c,v:Number.isFinite(Number(c.v))?Number(c.v):0})) : fresh.candles[k];
+    repaired.dailyCandles[k]=Array.isArray(s.dailyCandles&&s.dailyCandles[k]) ?
+      s.dailyCandles[k].filter(validCandle).map(c=>({...c,v:Number.isFinite(Number(c.v))?Number(c.v):0})) : [];
+    if(!Number.isFinite(Number(repaired.prices[k]))) repaired.prices[k]=I[k].price;
+    if(!Number.isFinite(Number(repaired.dayOpen[k]))) repaired.dayOpen[k]=repaired.prices[k];
+    if(!Number.isFinite(Number(repaired.dayHigh[k]))) repaired.dayHigh[k]=repaired.prices[k];
+    if(!Number.isFinite(Number(repaired.dayLow[k]))) repaired.dayLow[k]=repaired.prices[k];
+    if(!Number.isFinite(Number(repaired.dayVol[k]))) repaired.dayVol[k]=0;
+  }
+  return repaired;
+}
+
 export class MarketState{
   constructor(state){this.state=state}
-  async get(){ let s=await this.state.storage.get("state"); return (s&&s.candles&&s.dailyCandles)?s:seed(); }
+  async get(){ let s=await this.state.storage.get("state"); return (s&&s.candles&&s.dailyCandles)?repairState(s):seed(); }
   async put(s){await this.state.storage.put("state",s);return s}
   async fetch(req){
     let s=advance(await this.get()), u=new URL(req.url);
