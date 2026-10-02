@@ -1,7 +1,7 @@
 const CORS={"Access-Control-Allow-Origin":"*","Access-Control-Allow-Methods":"GET,POST,OPTIONS","Access-Control-Allow-Headers":"Content-Type, Authorization"};
 const START_CASH=1000000;
 const CANDLE_MS=60000;
-const MAX_CANDLES=500;
+const MAX_CANDLES=800;
 const MAX_DAILY=1500;
 const I={
 RELIANCE:{name:"Reliance Industries",sector:"Stocks",price:2925.4,lot:1},TCS:{name:"Tata Consultancy Services",sector:"IT",price:4140.2,lot:1},
@@ -18,9 +18,19 @@ VMM:{name:"Vishal Mega Mart",sector:"IPO",price:112.8,lot:1},HYUNDAI:{name:"Hyun
 NTPCGREEN:{name:"NTPC Green Energy",sector:"IPO",price:118.4,lot:1}};
 const json=(x,s=200)=>new Response(JSON.stringify(x),{status:s,headers:{"content-type":"application/json",...CORS}});
 
-function istParts(){ const d=new Date(new Date().toLocaleString("en-US",{timeZone:"Asia/Kolkata"})); return d; }
-function istDateStr(){ const d=istParts(); return d.getFullYear()+'-'+(d.getMonth()+1)+'-'+d.getDate(); }
-function open(){ const d=istParts(); const m=d.getHours()*60+d.getMinutes(); return d.getDay()!==0 && m>=555 && m<930; } // Mon-Sat, 9:15-15:30 IST
+function istDate(ts){ return new Date(new Date(ts).toLocaleString("en-US",{timeZone:"Asia/Kolkata"})); }
+function dayKey(ts){ return Math.floor((ts+19800000)/86400000); }
+function istDateStr(){ return dayKey(Date.now()); }
+// practice mode (default) = simulated market runs 24x7; otherwise real NSE hours Mon-Fri 9:15-15:30 IST
+function open(ts,practice){ if(practice!==false) return true; const d=istDate(ts||Date.now()); const m=d.getHours()*60+d.getMinutes(); return d.getDay()>0&&d.getDay()<6&&m>=555&&m<930; }
+
+// Backfill: random walk going BACKWARDS so the last close equals the anchor price
+function histCandles(anchor,n,stepMs,endT,vol,volBase){
+  const cl=[anchor]; for(let i=0;i<n;i++) cl.unshift(Math.max(.01,cl[0]/(1+(Math.random()-.5)*vol)));
+  const out=[]; for(let i=0;i<n;i++){ const o=cl[i],c=cl[i+1];
+    out.push({t:endT-(n-i)*stepMs,o,h:Math.max(o,c)*(1+Math.random()*vol/4),l:Math.min(o,c)*(1-Math.random()*vol/4),c,v:Math.round(Math.random()*volBase+volBase/4)}); }
+  return out;
+}
 
 function freshCandles(){ let c={}; const t=Math.floor(Date.now()/CANDLE_MS)*CANDLE_MS; for(let k in I) c[k]=[{t,o:I[k].price,h:I[k].price,l:I[k].price,c:I[k].price,v:0}]; return c; }
 function freshDaily(){ let c={}; for(let k in I) c[k]=[]; return c; }
@@ -31,15 +41,15 @@ const seed=()=>({
   dayHigh:Object.fromEntries(Object.entries(I).map(([k,v])=>[k,v.price])),
   dayLow:Object.fromEntries(Object.entries(I).map(([k,v])=>[k,v.price])),
   dayVol:Object.fromEntries(Object.entries(I).map(([k,v])=>[k,0])),
-  candles:freshCandles(), dailyCandles:freshDaily(), lastDay:istDateStr(),
+  candles:freshCandles(), dailyCandles:freshDaily(), lastDay:istDateStr(), practice:true,
   updatedAt:Date.now()
 });
 
 function rolloverDayIfNeeded(s){
-  const today=istDateStr();
-  if(s.lastDay!==today){
+  const today=dayKey(Date.now());
+  if(s.lastDay<today){
     for(let k in I){
-      s.dailyCandles[k].push({t:Date.now(), o:s.dayOpen[k], h:s.dayHigh[k], l:s.dayLow[k], c:s.prices[k], v:s.dayVol[k]});
+      s.dailyCandles[k].push({t:s.lastDay*86400000-19800000, o:s.dayOpen[k], h:s.dayHigh[k], l:s.dayLow[k], c:s.prices[k], v:s.dayVol[k]});
       if(s.dailyCandles[k].length>MAX_DAILY) s.dailyCandles[k].shift();
       s.dayOpen[k]=s.prices[k]; s.dayHigh[k]=s.prices[k]; s.dayLow[k]=s.prices[k]; s.dayVol[k]=0;
     }
@@ -47,7 +57,7 @@ function rolloverDayIfNeeded(s){
   }
 }
 
-function tickOne(s,k){
+function tickOne(s,k,ts){
   let old=s.prices[k];
   let np=Math.max(.01, old*(1+(Math.random()-.5)*.0016));
   s.prices[k]=np;
@@ -55,7 +65,7 @@ function tickOne(s,k){
   if(np<s.dayLow[k])s.dayLow[k]=np;
   let vol=Math.round(Math.abs(np-old)/old*5000000+Math.random()*8000);
   s.dayVol[k]=(s.dayVol[k]||0)+vol;
-  let bucket=Math.floor(Date.now()/CANDLE_MS)*CANDLE_MS;
+  let bucket=Math.floor(ts/CANDLE_MS)*CANDLE_MS;
   let arr=s.candles[k];
   let last=arr[arr.length-1];
   if(last&&last.t===bucket){ last.h=Math.max(last.h,np); last.l=Math.min(last.l,np); last.c=np; last.v+=vol; }
@@ -63,18 +73,19 @@ function tickOne(s,k){
 }
 
 function advance(s){
-  if(!s.candles || !s.dailyCandles || !s.dayVol){
-    s=repairState(s);
-  } else {
-    s=repairState(s);
-  }
+  s=repairState(s);
   rolloverDayIfNeeded(s);
-  let n=Date.now(), steps=Math.min(40,Math.floor(Math.max(0,n-s.updatedAt)/2500));
-  if(open()) for(let k=0;k<steps;k++) for(let sym in I) tickOne(s,sym);
-  s.updatedAt=n;
+  const n=Date.now(); let gap=Math.max(0,n-s.updatedAt);
+  if(gap>6*3600000){ s.updatedAt=n-6*3600000; gap=6*3600000; }
+  const steps=Math.min(1500,Math.floor(gap/2500));
+  // only move updatedAt when ticks happen, so fast polling no longer starves the simulation
+  if(steps>0){
+    const stepMs=gap/steps;
+    for(let i=1;i<=steps;i++){ const ts=s.updatedAt+i*stepMs; if(open(ts,s.practice)) for(let sym in I) tickOne(s,sym,ts); }
+    s.updatedAt=n;
+  }
   return s;
 }
-
 
 function validCandle(c){
   return c && Number.isFinite(Number(c.t)) && Number.isFinite(Number(c.o)) &&
@@ -97,7 +108,8 @@ function repairState(s){
     dayVol:s.dayVol&&typeof s.dayVol==="object"?s.dayVol:fresh.dayVol,
     candles:{},
     dailyCandles:{},
-    lastDay:s.lastDay||fresh.lastDay,
+    lastDay:Number.isFinite(Number(s.lastDay))?Number(s.lastDay):fresh.lastDay,
+    practice:s.practice!==false,
     updatedAt:Number.isFinite(Number(s.updatedAt))?Number(s.updatedAt):Date.now()
   };
   for(const k in I){
@@ -105,6 +117,8 @@ function repairState(s){
     repaired.dailyCandles[k]=Array.isArray(s.dailyCandles&&s.dailyCandles[k]) ?
       s.dailyCandles[k].filter(validCandle).map(c=>({...c,v:Number.isFinite(Number(c.v))?Number(c.v):0})) : [];
     if(!Number.isFinite(Number(repaired.prices[k]))) repaired.prices[k]=I[k].price;
+    if(repaired.candles[k].length<60){ const f=repaired.candles[k][0]; repaired.candles[k]=histCandles(f.o,390,CANDLE_MS,f.t,.003,15000).concat(repaired.candles[k]); }
+    if(repaired.dailyCandles[k].length<30){ repaired.dailyCandles[k]=histCandles(Number.isFinite(Number(repaired.dayOpen[k]))?repaired.dayOpen[k]:I[k].price,365,86400000,dayKey(Date.now())*86400000-19800000,.02,2000000); }
     if(!Number.isFinite(Number(repaired.dayOpen[k]))) repaired.dayOpen[k]=repaired.prices[k];
     if(!Number.isFinite(Number(repaired.dayHigh[k]))) repaired.dayHigh[k]=repaired.prices[k];
     if(!Number.isFinite(Number(repaired.dayLow[k]))) repaired.dayLow[k]=repaired.prices[k];
@@ -124,7 +138,7 @@ export class MarketState{
       await this.put(s);
       let change={};
       for(let k in I) change[k]=+(((s.prices[k]-s.dayOpen[k])/s.dayOpen[k])*100).toFixed(2);
-      return json({ok:true,onlineOnly:true,serverTime:new Date().toISOString(),marketOpen:open(),cash:s.cash,positions:s.positions,orders:s.orders.slice(-100),prices:s.prices,dayOpen:s.dayOpen,dayHigh:s.dayHigh,dayLow:s.dayLow,dayVol:s.dayVol,changePct:change,instruments:I});
+      return json({ok:true,onlineOnly:true,serverTime:new Date().toISOString(),marketOpen:open(Date.now(),s.practice),practice:s.practice,cash:s.cash,positions:s.positions,orders:s.orders.slice(-100),prices:s.prices,dayOpen:s.dayOpen,dayHigh:s.dayHigh,dayLow:s.dayLow,dayVol:s.dayVol,changePct:change,instruments:I});
     }
     if(u.pathname==="/api/candles"&&req.method==="GET"){
       let sym=String(u.searchParams.get("symbol")||"").toUpperCase();
@@ -157,6 +171,11 @@ export class MarketState{
       let o={id:crypto.randomUUID(),symbol:sym,side,qty:q,price:p,value,brokerage:fee,time:new Date().toISOString(),status:"FILLED",virtual:true};
       s.orders.push(o); await this.put(s);
       return json({ok:true,order:o,cash:s.cash,positions:s.positions});
+    }
+    if(u.pathname==="/api/settings"&&req.method==="POST"){
+      let b; try{b=await req.json()}catch{b={}}
+      s.practice=!!b.practice; await this.put(s);
+      return json({ok:true,practice:s.practice,marketOpen:open(Date.now(),s.practice)});
     }
     if(u.pathname==="/api/reset"&&req.method==="POST"){ await this.put(seed()); return json({ok:true,reset:true}); }
     if(u.pathname==="/api/seed-demo"&&req.method==="POST"){
