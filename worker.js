@@ -1,8 +1,8 @@
 const CORS={"Access-Control-Allow-Origin":"*","Access-Control-Allow-Methods":"GET,POST,OPTIONS","Access-Control-Allow-Headers":"Content-Type, Authorization"};
 const START_CASH=1000000;
 const CANDLE_MS=60000;
-const MAX_CANDLES=800;
-const MAX_DAILY=1500;
+const MAX_CANDLES=3000;
+const MAX_DAILY=2200;
 const I={
 RELIANCE:{name:"Reliance Industries",sector:"Stocks",price:2925.4,lot:1},TCS:{name:"Tata Consultancy Services",sector:"IT",price:4140.2,lot:1},
 HDFCBANK:{name:"HDFC Bank",sector:"Banking",price:1948.6,lot:1},INFY:{name:"Infosys",sector:"IT",price:1512.3,lot:1},
@@ -22,7 +22,7 @@ function istDate(ts){ return new Date(new Date(ts).toLocaleString("en-US",{timeZ
 function dayKey(ts){ return Math.floor((ts+19800000)/86400000); }
 function istDateStr(){ return dayKey(Date.now()); }
 // practice mode (default) = simulated market runs 24x7; otherwise real NSE hours Mon-Fri 9:15-15:30 IST
-function open(ts,practice){ if(practice!==false) return true; const d=istDate(ts||Date.now()); const m=d.getHours()*60+d.getMinutes(); return d.getDay()>0&&d.getDay()<6&&m>=555&&m<930; }
+function open(ts){ const d=istDate(ts||Date.now()); const m=d.getHours()*60+d.getMinutes(); return d.getDay()>0&&d.getDay()<6&&m>=555&&m<930; } // NSE Mon-Fri 9:15-15:30 IST
 
 // Backfill: random walk going BACKWARDS so the last close equals the anchor price
 function histCandles(anchor,n,stepMs,endT,vol,volBase){
@@ -41,7 +41,7 @@ const seed=()=>({
   dayHigh:Object.fromEntries(Object.entries(I).map(([k,v])=>[k,v.price])),
   dayLow:Object.fromEntries(Object.entries(I).map(([k,v])=>[k,v.price])),
   dayVol:Object.fromEntries(Object.entries(I).map(([k,v])=>[k,0])),
-  candles:freshCandles(), dailyCandles:freshDaily(), lastDay:istDateStr(), practice:true,
+  candles:freshCandles(), dailyCandles:freshDaily(), lastDay:istDateStr(), practice:false,
   updatedAt:Date.now()
 });
 
@@ -73,7 +73,6 @@ function tickOne(s,k,ts){
 }
 
 function advance(s){
-  s=repairState(s);
   rolloverDayIfNeeded(s);
   const n=Date.now(); let gap=Math.max(0,n-s.updatedAt);
   if(gap>6*3600000){ s.updatedAt=n-6*3600000; gap=6*3600000; }
@@ -81,10 +80,46 @@ function advance(s){
   // only move updatedAt when ticks happen, so fast polling no longer starves the simulation
   if(steps>0){
     const stepMs=gap/steps;
-    for(let i=1;i<=steps;i++){ const ts=s.updatedAt+i*stepMs; if(open(ts,s.practice)) for(let sym in I) tickOne(s,sym,ts); }
+    for(let i=1;i<=steps;i++){ const ts=s.updatedAt+i*stepMs; if(open(ts)) for(let sym in I) tickOne(s,sym,ts); }
     s.updatedAt=n;
   }
   return s;
+}
+
+function aggC(arr,mins){
+  if(mins<=1) return arr; const ms=mins*60000,out=[]; let cur=null;
+  for(const c of arr){ const b=Math.floor(c.t/ms)*ms;
+    if(!cur||cur.t!==b){ if(cur) out.push(cur); cur={t:b,o:c.o,h:c.h,l:c.l,c:c.c,v:c.v||0}; }
+    else { cur.h=Math.max(cur.h,c.h); cur.l=Math.min(cur.l,c.l); cur.c=c.c; cur.v+=c.v||0; } }
+  if(cur) out.push(cur); return out;
+}
+// ---------- News (live RSS, cached 4 min in KV) ----------
+const FEEDS=[
+ ["India","https://news.google.com/rss/search?q=Sensex+OR+Nifty+OR+%22Indian+stock+market%22+when:1d&hl=en-IN&gl=IN&ceid=IN:en"],
+ ["Global","https://news.google.com/rss/search?q=%22Wall+Street%22+OR+%22global+markets%22+OR+%22stock+market%22+when:1d&hl=en-US&gl=US&ceid=US:en"],
+ ["Buzz","https://news.google.com/rss/search?q=%22stocks+to+watch%22+OR+%22buzzing+stocks%22+OR+rumour+India+when:1d&hl=en-IN&gl=IN&ceid=IN:en"]];
+const POS=/\b(rally|rallies|surge|surges|jump|jumps|gain|gains|rise|rises|soar|soars|record high|bullish|upbeat|rebound|climb|climbs|advance|advances|boost)\b/i;
+const NEG=/\b(fall|falls|drop|drops|slump|slumps|plunge|plunges|crash|tumble|tumbles|sink|sinks|decline|declines|slide|slides|bearish|selloff|sell-off|losses|weak|fear|fears)\b/i;
+const dec=x=>x.replace(/<!\[CDATA\[|\]\]>/g,"").replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/<[^>]+>/g,"").trim();
+async function loadNews(env){
+  const cached=await env.USERS_KV.get("news:cache",{type:"json"});
+  if(cached&&Date.now()-cached.at<240000) return cached.data;
+  const all=[];
+  await Promise.all(FEEDS.map(async([cat,url])=>{ try{
+    const x=await (await fetch(url,{headers:{"user-agent":"Mozilla/5.0"}})).text(), items=[];
+    for(const m of x.matchAll(/<item>([\s\S]*?)<\/item>/g)){ const b=m[1];
+      const g=t=>{const q=b.match(new RegExp("<"+t+"[^>]*>([\\s\\S]*?)</"+t+">")); return q?dec(q[1]):"";};
+      let title=g("title"), source=g("source"); if(source&&title.endsWith(" - "+source)) title=title.slice(0,-(source.length+3));
+      items.push({id:cat+":"+title.slice(0,80),cat,title,link:g("link"),source,ts:Date.parse(g("pubDate"))||Date.now(),sent:(POS.test(title)?1:0)-(NEG.test(title)?1:0)}); }
+    all.push(...items.sort((a,b)=>b.ts-a.ts).slice(0,15));
+  }catch(e){} }));
+  if(!all.length) return cached?cached.data:{items:[],outlook:null};
+  all.sort((a,b)=>b.ts-a.ts);
+  let up=0,down=0; all.forEach(i=>{ if(i.cat!=="Buzz"){ if(i.sent>0)up++; else if(i.sent<0)down++; } });
+  const label=up>down*1.3?"Bullish":down>up*1.3?"Bearish":"Mixed";
+  const data={items:all,outlook:{label,up,down}};
+  await env.USERS_KV.put("news:cache",JSON.stringify({at:Date.now(),data}),{expirationTtl:600});
+  return data;
 }
 
 function validCandle(c){
@@ -109,7 +144,7 @@ function repairState(s){
     candles:{},
     dailyCandles:{},
     lastDay:Number.isFinite(Number(s.lastDay))?Number(s.lastDay):fresh.lastDay,
-    practice:s.practice!==false,
+    practice:false,
     updatedAt:Number.isFinite(Number(s.updatedAt))?Number(s.updatedAt):Date.now()
   };
   for(const k in I){
@@ -117,8 +152,8 @@ function repairState(s){
     repaired.dailyCandles[k]=Array.isArray(s.dailyCandles&&s.dailyCandles[k]) ?
       s.dailyCandles[k].filter(validCandle).map(c=>({...c,v:Number.isFinite(Number(c.v))?Number(c.v):0})) : [];
     if(!Number.isFinite(Number(repaired.prices[k]))) repaired.prices[k]=I[k].price;
-    if(repaired.candles[k].length<60){ const f=repaired.candles[k][0]; repaired.candles[k]=histCandles(f.o,390,CANDLE_MS,f.t,.003,15000).concat(repaired.candles[k]); }
-    if(repaired.dailyCandles[k].length<30){ repaired.dailyCandles[k]=histCandles(Number.isFinite(Number(repaired.dayOpen[k]))?repaired.dayOpen[k]:I[k].price,365,86400000,dayKey(Date.now())*86400000-19800000,.02,2000000); }
+    if(repaired.candles[k].length<1000){ const f=repaired.candles[k][0]; repaired.candles[k]=histCandles(f.o,1500,CANDLE_MS,f.t,.003,15000).concat(repaired.candles[k]); }
+    if(repaired.dailyCandles[k].length<1000){ repaired.dailyCandles[k]=histCandles(Number.isFinite(Number(repaired.dayOpen[k]))?repaired.dayOpen[k]:I[k].price,1825,86400000,dayKey(Date.now())*86400000-19800000,.02,2000000); }
     if(!Number.isFinite(Number(repaired.dayOpen[k]))) repaired.dayOpen[k]=repaired.prices[k];
     if(!Number.isFinite(Number(repaired.dayHigh[k]))) repaired.dayHigh[k]=repaired.prices[k];
     if(!Number.isFinite(Number(repaired.dayLow[k]))) repaired.dayLow[k]=repaired.prices[k];
@@ -128,9 +163,25 @@ function repairState(s){
 }
 
 export class MarketState{
-  constructor(state){this.state=state}
-  async get(){ let s=await this.state.storage.get("state"); return (s&&s.candles&&s.dailyCandles)?repairState(s):seed(); }
-  async put(s){await this.state.storage.put("state",s);return s}
+  constructor(state){this.state=state;this.mem=null;this.lastBulk=0}
+  async get(){
+    if(this.mem) return this.mem;
+    let m=await this.state.storage.get("state");
+    if(!m) return repairState(seed());
+    if(!m.candles){ // split storage: one key per symbol (keeps every value well under the size limit)
+      const keys=[]; for(const k in I) keys.push("c:"+k,"d:"+k);
+      const got=await this.state.storage.get(keys);
+      m.candles={}; m.dailyCandles={};
+      for(const k in I){ m.candles[k]=got.get("c:"+k)||[]; m.dailyCandles[k]=got.get("d:"+k)||[]; }
+    }
+    return repairState(m);
+  }
+  async put(s,force){
+    this.mem=s;
+    const {candles,dailyCandles,...meta}=s; const ent={state:meta}, now=Date.now();
+    if(force||now-this.lastBulk>20000){ for(const k in I){ ent["c:"+k]=candles[k]; ent["d:"+k]=dailyCandles[k]; } this.lastBulk=now; }
+    await this.state.storage.put(ent); return s;
+  }
   async fetch(req){
     let s=advance(await this.get()), u=new URL(req.url);
 
@@ -138,20 +189,22 @@ export class MarketState{
       await this.put(s);
       let change={};
       for(let k in I) change[k]=+(((s.prices[k]-s.dayOpen[k])/s.dayOpen[k])*100).toFixed(2);
-      return json({ok:true,onlineOnly:true,serverTime:new Date().toISOString(),marketOpen:open(Date.now(),s.practice),practice:s.practice,cash:s.cash,positions:s.positions,orders:s.orders.slice(-100),prices:s.prices,dayOpen:s.dayOpen,dayHigh:s.dayHigh,dayLow:s.dayLow,dayVol:s.dayVol,changePct:change,instruments:I});
+      return json({ok:true,onlineOnly:true,serverTime:new Date().toISOString(),marketOpen:open(Date.now()),cash:s.cash,positions:s.positions,orders:s.orders.slice(-100),prices:s.prices,dayOpen:s.dayOpen,dayHigh:s.dayHigh,dayLow:s.dayLow,dayVol:s.dayVol,changePct:change,instruments:I});
     }
     if(u.pathname==="/api/candles"&&req.method==="GET"){
       let sym=String(u.searchParams.get("symbol")||"").toUpperCase();
       if(!I[sym]) return json({ok:false,error:"Unknown instrument"},400);
       await this.put(s);
-      return json({ok:true,symbol:sym,candles:s.candles[sym]||[]});
+      const tf=Math.max(1,parseInt(u.searchParams.get("tf"))||1);
+      return json({ok:true,symbol:sym,tf,candles:aggC(s.candles[sym]||[],tf).slice(-400)});
     }
     if(u.pathname==="/api/daily"&&req.method==="GET"){
       let sym=String(u.searchParams.get("symbol")||"").toUpperCase();
       if(!I[sym]) return json({ok:false,error:"Unknown instrument"},400);
       await this.put(s);
       const hist=[...(s.dailyCandles[sym]||[]), {t:Date.now(), o:s.dayOpen[sym], h:s.dayHigh[sym], l:s.dayLow[sym], c:s.prices[sym], v:s.dayVol[sym]}];
-      return json({ok:true,symbol:sym,daily:hist});
+      const days=Math.min(2000,parseInt(u.searchParams.get("days"))||365), y=hist.slice(-365);
+      return json({ok:true,symbol:sym,daily:hist.slice(-days),hi52:Math.max(...y.map(c=>c.h)),lo52:Math.min(...y.map(c=>c.l))});
     }
     if(u.pathname==="/api/order"&&req.method==="POST"){
       let b; try{b=await req.json()}catch{return json({ok:false,error:"Invalid JSON"},400)};
@@ -175,9 +228,9 @@ export class MarketState{
     if(u.pathname==="/api/settings"&&req.method==="POST"){
       let b; try{b=await req.json()}catch{b={}}
       s.practice=!!b.practice; await this.put(s);
-      return json({ok:true,practice:s.practice,marketOpen:open(Date.now(),s.practice)});
+      return json({ok:true,practice:s.practice,marketOpen:open(Date.now())});
     }
-    if(u.pathname==="/api/reset"&&req.method==="POST"){ await this.put(seed()); return json({ok:true,reset:true}); }
+    if(u.pathname==="/api/reset"&&req.method==="POST"){ await this.put(repairState(seed()),true); return json({ok:true,reset:true}); }
     if(u.pathname==="/api/seed-demo"&&req.method==="POST"){
       const now=Date.now();
       for(let k in I){
@@ -216,7 +269,7 @@ export default{
       const hash=await hashPassword(password,salt);
       await env.USERS_KV.put("user:"+username, JSON.stringify({hash,salt,createdAt:Date.now()}));
       const token=crypto.randomUUID();
-      await env.USERS_KV.put("session:"+token, username, {expirationTtl:60*60*24*30});
+      await env.USERS_KV.put("session:"+token, username, {expirationTtl:60*60*24*365});
       return json({ok:true,token,username});
     }
     if(url.pathname==="/api/auth/login"&&req.method==="POST"){
@@ -229,7 +282,7 @@ export default{
       const hash=await hashPassword(password,rec.salt);
       if(hash!==rec.hash) return json({ok:false,error:"Invalid username or password"},400);
       const token=crypto.randomUUID();
-      await env.USERS_KV.put("session:"+token, username, {expirationTtl:60*60*24*30});
+      await env.USERS_KV.put("session:"+token, username, {expirationTtl:60*60*24*365});
       return json({ok:true,token,username});
     }
     if(url.pathname==="/api/auth/me"&&req.method==="GET"){
@@ -237,6 +290,8 @@ export default{
       if(!username) return json({ok:false,error:"Not logged in"},401);
       return json({ok:true,username});
     }
+
+    if(url.pathname==="/api/news"&&req.method==="GET"){ const d=await loadNews(env); return json({ok:true,...d}); }
 
     // ---- Game endpoints (require session) ----
     if(url.pathname.startsWith("/api/")){
