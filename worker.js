@@ -1,91 +1,158 @@
+// MarketIQ backend v3 — shared world-market simulation (same prices for every user), per-user wallet.
 const CORS={"Access-Control-Allow-Origin":"*","Access-Control-Allow-Methods":"GET,POST,OPTIONS","Access-Control-Allow-Headers":"Content-Type, Authorization"};
-const START_CASH=1000000;
-const CANDLE_MS=60000;
-const MAX_CANDLES=3000;
-const MAX_DAILY=2200;
-const I={
-RELIANCE:{name:"Reliance Industries",sector:"Stocks",price:2925.4,lot:1},TCS:{name:"Tata Consultancy Services",sector:"IT",price:4140.2,lot:1},
-HDFCBANK:{name:"HDFC Bank",sector:"Banking",price:1948.6,lot:1},INFY:{name:"Infosys",sector:"IT",price:1512.3,lot:1},
-ICICIBANK:{name:"ICICI Bank",sector:"Banking",price:1425.7,lot:1},SBIN:{name:"State Bank of India",sector:"Banking",price:825.3,lot:1},
-BHARTIARTL:{name:"Bharti Airtel",sector:"Telecom",price:1810.5,lot:1},ITC:{name:"ITC",sector:"FMCG",price:458.25,lot:1},
-LT:{name:"Larsen & Toubro",sector:"Industrials",price:3840.8,lot:1},MARUTI:{name:"Maruti Suzuki",sector:"Auto",price:14220,lot:1},
-TATASTEEL:{name:"Tata Steel",sector:"Metals",price:178.4,lot:10},SUNPHARMA:{name:"Sun Pharma",sector:"Healthcare",price:1745.2,lot:1},
-HINDUNILVR:{name:"Hindustan Unilever",sector:"FMCG",price:2765.1,lot:1},AXISBANK:{name:"Axis Bank",sector:"Banking",price:1235.6,lot:1},
-NIFTY50:{name:"NIFTY 50",sector:"Index",price:25840.2,lot:1},BANKNIFTY:{name:"NIFTY Bank",sector:"Index",price:58540,lot:1},
-GOLD:{name:"Gold (educational proxy)",sector:"Commodity",price:112850,lot:1},SILVER:{name:"Silver (educational proxy)",sector:"Commodity",price:132450,lot:1},
-SWIGGY:{name:"Swiggy Ltd",sector:"IPO",price:420.5,lot:1},OLAELEC:{name:"Ola Electric Mobility",sector:"IPO",price:68.2,lot:1},
-VMM:{name:"Vishal Mega Mart",sector:"IPO",price:112.8,lot:1},HYUNDAI:{name:"Hyundai Motor India",sector:"IPO",price:1865.0,lot:1},
-NTPCGREEN:{name:"NTPC Green Energy",sector:"IPO",price:118.4,lot:1}};
+const START_CASH=10000000, FEE=0.0005;
 const json=(x,s=200)=>new Response(JSON.stringify(x),{status:s,headers:{"content-type":"application/json",...CORS}});
+const FX={INR:1,USD:88.2,EUR:103,GBP:118,JPY:0.59,HKD:11.3};
 
-function istDate(ts){ return new Date(new Date(ts).toLocaleString("en-US",{timeZone:"Asia/Kolkata"})); }
-function dayKey(ts){ return Math.floor((ts+19800000)/86400000); }
-function istDateStr(){ return dayKey(Date.now()); }
-// practice mode (default) = simulated market runs 24x7; otherwise real NSE hours Mon-Fri 9:15-15:30 IST
-function open(ts){ const d=istDate(ts||Date.now()); const m=d.getHours()*60+d.getMinutes(); return d.getDay()>0&&d.getDay()<6&&m>=555&&m<930; } // NSE Mon-Fri 9:15-15:30 IST
+/* ================= INSTRUMENTS ================= */
+const T={};
+function add(grp,mkt,ccy,vol,rows){ for(const r of rows) T[r[0]]={sym:r[0],name:r[1],sector:r[2],grp,mkt,ccy,fx:FX[ccy],base:r[3],lot:r[4]||1,vol:vol,kind:"EQ"}; }
+add("India","IN","INR",.017,[
+["RELIANCE","Reliance Industries","Energy",2925.4],["TCS","Tata Consultancy Services","IT",4140.2],["HDFCBANK","HDFC Bank","Banking",1948.6],["INFY","Infosys","IT",1512.3],
+["ICICIBANK","ICICI Bank","Banking",1425.7],["SBIN","State Bank of India","Banking",825.3],["BHARTIARTL","Bharti Airtel","Telecom",1810.5],["ITC","ITC","FMCG",458.25],
+["LT","Larsen & Toubro","Industrials",3840.8],["MARUTI","Maruti Suzuki","Auto",14220],["TATASTEEL","Tata Steel","Metals",178.4,10],["SUNPHARMA","Sun Pharma","Healthcare",1745.2],
+["HINDUNILVR","Hindustan Unilever","FMCG",2765.1],["AXISBANK","Axis Bank","Banking",1235.6],["WIPRO","Wipro","IT",265.4],["KOTAKBANK","Kotak Mahindra Bank","Banking",2150],
+["BAJFINANCE","Bajaj Finance","Finance",950],["ADANIENT","Adani Enterprises","Conglomerate",2480],["TATAMOTORS","Tata Motors","Auto",720],["ONGC","ONGC","Energy",245],
+["NTPC","NTPC","Power",350],["TITAN","Titan Company","Consumer",3500],["ASIANPAINT","Asian Paints","Consumer",2350],["HCLTECH","HCL Technologies","IT",1620]]);
+add("India","IN","INR",.03,[["SWIGGY","Swiggy Ltd","IPO",420.5],["OLAELEC","Ola Electric Mobility","IPO",68.2],["VMM","Vishal Mega Mart","IPO",112.8],["HYUNDAI","Hyundai Motor India","IPO",1865],["NTPCGREEN","NTPC Green Energy","IPO",118.4]]);
+add("Indices","IN","INR",.009,[["NIFTY50","NIFTY 50","Index",25840.2],["BANKNIFTY","NIFTY Bank","Index",58540],["SENSEX","BSE Sensex","Index",84600],["NIFTYIT","NIFTY IT","Index",38500]]);
+add("Indices","US","USD",.009,[["SPX","S&P 500","Index",6700],["NDX","Nasdaq 100","Index",24500],["DJI","Dow Jones","Index",46500]]);
+add("Indices","EU","EUR",.009,[["DAX","DAX 40","Index",24000],["CAC40","CAC 40","Index",7900]]);
+add("Indices","EU","GBP",.009,[["FTSE","FTSE 100","Index",9500]]);
+add("Indices","JP","JPY",.01,[["NIKKEI","Nikkei 225","Index",45000]]);
+add("Indices","HK","HKD",.012,[["HSI","Hang Seng","Index",26500]]);
+add("USA","US","USD",.018,[["AAPL","Apple","Technology",255],["MSFT","Microsoft","Technology",520],["NVDA","NVIDIA","Technology",185],["GOOGL","Alphabet","Technology",245],
+["AMZN","Amazon","Consumer",230],["META","Meta Platforms","Technology",750],["TSLA","Tesla","Auto",430],["JPM","JPMorgan Chase","Banking",300],["V","Visa","Finance",345],
+["WMT","Walmart","Retail",100],["KO","Coca-Cola","FMCG",68],["DIS","Walt Disney","Media",110],["NFLX","Netflix","Media",1200],["AMD","AMD","Technology",160],
+["INTC","Intel","Technology",24],["BA","Boeing","Industrials",215],["PFE","Pfizer","Healthcare",26],["XOM","Exxon Mobil","Energy",110],["ORCL","Oracle","Technology",280],["TSM","TSMC (ADR)","Technology",285]]);
+add("Europe","EU","EUR",.014,[["SAP","SAP SE","Technology",230],["ASML","ASML Holding","Technology",800],["LVMH","LVMH","Luxury",560],["NESN","Nestlé","FMCG",90],["AIR","Airbus","Industrials",175],["SIE","Siemens","Industrials",220],["TTE","TotalEnergies","Energy",58]]);
+add("Europe","EU","GBP",.014,[["SHEL","Shell","Energy",27],["HSBA","HSBC","Banking",9.5],["AZN","AstraZeneca","Healthcare",125]]);
+add("Asia","JP","JPY",.016,[["TOYOTA","Toyota Motor","Auto",2800],["SONY","Sony Group","Technology",3900],["SOFTBANK","SoftBank Group","Technology",14000],["NINTENDO","Nintendo","Gaming",13500]]);
+add("Asia","HK","HKD",.02,[["TENCENT","Tencent","Technology",620],["ALIBABA","Alibaba (HK)","Technology",150],["XIAOMI","Xiaomi","Technology",55],["BYD","BYD Company","Auto",105],["MEITUAN","Meituan","Consumer",120]]);
+add("Commodities","MCX","INR",.011,[["GOLD","Gold (₹/10g, proxy)","Metal",112850],["SILVER","Silver (₹/kg, proxy)","Metal",132450],["CRUDEOIL","Crude Oil (₹/bbl)","Energy",5950],["NATGAS","Natural Gas (₹/mmBtu)","Energy",270],["COPPER","Copper (₹/kg)","Metal",920]]);
+add("Commodities","GL","USD",.011,[["XAUUSD","Gold Spot (US$/oz)","Metal",3900],["XAGUSD","Silver Spot (US$/oz)","Metal",47],["WTI","WTI Crude (US$/bbl)","Energy",65],["BRENT","Brent Crude (US$/bbl)","Energy",69]]);
+add("Forex","GL","INR",.004,[["USDINR","US Dollar / Rupee","Currency",88.2,1000],["EURINR","Euro / Rupee","Currency",103,1000],["GBPINR","Pound / Rupee","Currency",118,1000],["JPYINR","Yen / Rupee","Currency",0.59,1000]]);
+add("Forex","GL","USD",.005,[["EURUSD","Euro / US Dollar","Currency",1.17,1000],["GBPUSD","Pound / US Dollar","Currency",1.34,1000]]);
+add("Forex","GL","JPY",.005,[["USDJPY","US Dollar / Yen","Currency",148,1000]]);
+add("Crypto","CR","USD",.03,[["BTC","Bitcoin (per 0.01 BTC)","Crypto",1050],["ETH","Ethereum (per 0.1 ETH)","Crypto",420],["SOL","Solana","Crypto",200],["XRP","XRP","Crypto",2.6],["BNB","BNB","Crypto",900],["DOGE","Dogecoin","Crypto",0.24,100]]);
 
-// Backfill: random walk going BACKWARDS so the last close equals the anchor price
-function histCandles(anchor,n,stepMs,endT,vol,volBase){
-  const cl=[anchor]; for(let i=0;i<n;i++) cl.unshift(Math.max(.01,cl[0]/(1+(Math.random()-.5)*vol)));
-  const out=[]; for(let i=0;i<n;i++){ const o=cl[i],c=cl[i+1];
-    out.push({t:endT-(n-i)*stepMs,o,h:Math.max(o,c)*(1+Math.random()*vol/4),l:Math.min(o,c)*(1-Math.random()*vol/4),c,v:Math.round(Math.random()*volBase+volBase/4)}); }
+/* ================= MARKET HOURS (UTC minutes) ================= */
+const MN={IN:"NSE",MCX:"MCX",US:"US market",EU:"European market",JP:"Tokyo market",HK:"Hong Kong market",GL:"Global market",CR:"Crypto"};
+const HRS={IN:"NSE trades 9:15 AM–3:30 PM IST, Mon–Fri.",MCX:"MCX trades 9:00 AM–11:30 PM IST, Mon–Fri.",US:"US trades ≈7:00 PM–1:30 AM IST (Mon–Fri).",EU:"Europe trades ≈12:30 PM–9:00 PM IST (Mon–Fri).",JP:"Tokyo trades ≈5:30–11:30 AM IST (Mon–Fri).",HK:"Hong Kong trades ≈7:00 AM–1:30 PM IST (Mon–Fri).",GL:"Trades 24 hours, Mon–Fri.",CR:"Trades 24x7."};
+function dstUS(ts){const d=new Date(ts),m=d.getUTCMonth()+1,x=d.getUTCDate();return (m>3&&m<11)||(m===3&&x>=9)||(m===11&&x<2);}
+function dstEU(ts){const d=new Date(ts),m=d.getUTCMonth()+1,x=d.getUTCDate();return (m>3&&m<10)||(m===3&&x>=29)||(m===10&&x<25);}
+function sess(mkt,ts){
+  switch(mkt){case"IN":return[225,600];case"MCX":return[210,1080];case"JP":return[0,360];case"HK":return[90,480];
+    case"US":return dstUS(ts)?[810,1200]:[870,1260];case"EU":return dstEU(ts)?[420,930]:[480,990];}
+  return null;
+}
+function isOpen(mkt,ts){
+  if(mkt==="CR") return true;
+  const d=new Date(ts),dow=d.getUTCDay(),min=d.getUTCHours()*60+d.getUTCMinutes();
+  if(mkt==="GL") return !(dow===6||(dow===0&&min<1320)||(dow===5&&min>=1320));
+  const s=sess(mkt,ts); return dow>0&&dow<6&&min>=s[0]&&min<s[1];
+}
+function lastActive(mkt,ts){
+  if(isOpen(mkt,ts)) return ts;
+  let t=Math.floor(ts/60000)*60000;
+  for(let i=0;i<8000;i++){ t-=60000; if(isOpen(mkt,t)) return t+59999; }
+  return ts;
+}
+
+/* ================= DETERMINISTIC PRICE ENGINE ================= */
+function hash32(s){let h=2166136261;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619);}return h>>>0;}
+function rnd(n){let t=(n+0x6D2B79F5)>>>0;t=Math.imul(t^(t>>>15),t|1);t^=t+Math.imul(t^(t>>>7),t|61);return((t^(t>>>14))>>>0)/4294967296;}
+const PER=[0.125,0.46,2.3,9,31,93,290,800], ANCHOR=Date.UTC(2026,9,1,6,0), MC=new Map();
+function model(sym){
+  let m=MC.get(sym); if(m) return m;
+  const h=hash32(sym), vol=T[sym].vol; m={h,vol,A:[],ph:[]};
+  PER.forEach((P,k)=>{ m.A.push(vol*0.3*Math.sqrt(Math.min(P,400))*(P<1?2.2:1)*(0.6+rnd(h+k*131)*0.8)); m.ph.push(rnd(h*3+k*977)*6.283185); });
+  MC.set(sym,m); return m;
+}
+function lp(m,t){const d=t/86400000;let x=0;for(let k=0;k<8;k++)x+=m.A[k]*Math.sin(6.283185*d/PER[k]+m.ph[k]);return x;}
+function uPrice(sym,t){const m=model(sym);const n=(rnd((m.h+Math.floor(t/5000)*40503)>>>0)-.5)*m.vol*0.06;return T[sym].base*Math.exp(lp(m,t)-lp(m,ANCHOR)+n);}
+const MON=["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+const expTs=(d,mon,y)=>Date.UTC(2000+ +y,MON.indexOf(mon),+d,10,0); // 15:30 IST
+const OLOT={NIFTY:75,BANKNIFTY:35}, OUND={NIFTY:"NIFTY50",BANKNIFTY:"BANKNIFTY"}, OSIG={NIFTY:.14,BANKNIFTY:.17};
+const FLOT={NIFTY:75,BANKNIFTY:35,RELIANCE:500,TCS:175,HDFCBANK:550,INFY:400,SBIN:750,MES:5,MNQ:2,MCL:100,MGC:10};
+const FUND={NIFTY:"NIFTY50",BANKNIFTY:"BANKNIFTY",MES:"SPX",MNQ:"NDX",MCL:"WTI",MGC:"XAUUSD"};
+const DC=new Map();
+function inst(sym){
+  if(T[sym]) return T[sym];
+  if(DC.has(sym)) return DC.get(sym);
+  let m=/^(NIFTY|BANKNIFTY)-(\d{2})([A-Z]{3})(\d{2})-(\d+)-(CE|PE)$/.exec(sym), r=null;
+  if(m&&MON.includes(m[3])) r={sym,name:`${m[1]==="NIFTY"?"NIFTY":"BANK NIFTY"} ${m[2]} ${m[3][0]+m[3].slice(1).toLowerCase()} ${m[5]} ${m[6]}`,sector:`${m[1]} weekly options`,grp:"Options",mkt:"IN",ccy:"INR",fx:1,lot:OLOT[m[1]],kind:"OPT",und:OUND[m[1]],exp:expTs(m[2],m[3],m[4]),K:+m[5],cp:m[6],sig:OSIG[m[1]]};
+  else { m=/^([A-Z0-9]+)-FUT-(\d{2})([A-Z]{3})(\d{2})$/.exec(sym);
+    if(m&&FLOT[m[1]]&&MON.includes(m[3])){ const u=FUND[m[1]]||m[1]; if(T[u]) r={sym,name:`${m[1]} Futures ${m[2]} ${m[3][0]+m[3].slice(1).toLowerCase()}`,sector:"Futures",grp:"Futures",mkt:T[u].mkt,ccy:T[u].ccy,fx:T[u].fx,lot:FLOT[m[1]],kind:"FUT",und:u,exp:expTs(m[2],m[3],m[4])}; } }
+  if(r){ DC.set(sym,r); }
+  return r;
+}
+function ncdf(x){const a=Math.abs(x),t=1/(1+.2316419*a),d=.3989423*Math.exp(-a*a/2),p=d*t*(.3193815+t*(-.3565638+t*(1.781478+t*(-1.821256+t*1.330274))));return x>0?1-p:p;}
+function bs(S,K,Tm,r,s,cp){
+  if(Tm<=1e-7) return Math.max(0,cp==="CE"?S-K:K-S);
+  const sq=s*Math.sqrt(Tm),d1=(Math.log(S/K)+(r+s*s/2)*Tm)/sq,d2=d1-sq;
+  return cp==="CE"?S*ncdf(d1)-K*Math.exp(-r*Tm)*ncdf(d2):K*Math.exp(-r*Tm)*ncdf(-d2)-S*ncdf(-d1);
+}
+function price(sym,t){
+  const i=inst(sym); let p;
+  if(i.kind==="EQ") p=uPrice(sym,t);
+  else { const S=uPrice(i.und,t), Tm=Math.max(0,(i.exp-t)/31557600000);
+    p=i.kind==="FUT"?S*Math.exp((i.ccy==="INR"?.065:.045)*Tm):Math.max(.05,bs(S,i.K,Tm,.065,i.sig,i.cp)); }
+  return +p.toFixed(p<10?4:2);
+}
+function lastThu(y,m){const d=new Date(Date.UTC(y,m+1,0,10,0));while(d.getUTCDay()!==4)d.setUTCDate(d.getUTCDate()-1);return d.getTime();}
+const lbl=ts=>{const d=new Date(ts);return String(d.getUTCDate()).padStart(2,"0")+MON[d.getUTCMonth()]+String(d.getUTCFullYear()).slice(2);};
+function derivedList(now){
+  const d=new Date(now),y=d.getUTCFullYear(),mo=d.getUTCMonth(),out=[];
+  let n1=lastThu(y,mo); if(n1<now) n1=lastThu(y,mo+1); const nd=new Date(n1); const n2=lastThu(nd.getUTCFullYear(),nd.getUTCMonth()+1);
+  for(const b of["NIFTY","BANKNIFTY"]) out.push(`${b}-FUT-${lbl(n1)}`,`${b}-FUT-${lbl(n2)}`);
+  for(const b of["RELIANCE","TCS","HDFCBANK","INFY","SBIN","MES","MNQ","MCL","MGC"]) out.push(`${b}-FUT-${lbl(n1)}`);
+  let wk=Date.UTC(y,mo,d.getUTCDate()+((2-d.getUTCDay()+7)%7),10,0); if(wk<now) wk+=7*86400000;
+  const C={}; const c=mctx("IN",now,C);
+  for(const [b,step] of [["NIFTY",50],["BANKNIFTY",100]]){
+    const S=uPrice(OUND[b],c.te), atm=Math.round(S/step)*step;
+    for(let k=-6;k<=6;k++) for(const cp of["CE","PE"]) out.push(`${b}-${lbl(wk)}-${atm+k*step}-${cp}`);
+  }
   return out;
 }
 
-function freshCandles(){ let c={}; const t=Math.floor(Date.now()/CANDLE_MS)*CANDLE_MS; for(let k in I) c[k]=[{t,o:I[k].price,h:I[k].price,l:I[k].price,c:I[k].price,v:0}]; return c; }
-function freshDaily(){ let c={}; for(let k in I) c[k]=[]; return c; }
-const seed=()=>({
-  cash:START_CASH, positions:{}, orders:[],
-  prices:Object.fromEntries(Object.entries(I).map(([k,v])=>[k,v.price])),
-  dayOpen:Object.fromEntries(Object.entries(I).map(([k,v])=>[k,v.price])),
-  dayHigh:Object.fromEntries(Object.entries(I).map(([k,v])=>[k,v.price])),
-  dayLow:Object.fromEntries(Object.entries(I).map(([k,v])=>[k,v.price])),
-  dayVol:Object.fromEntries(Object.entries(I).map(([k,v])=>[k,0])),
-  candles:freshCandles(), dailyCandles:freshDaily(), lastDay:istDateStr(), practice:false,
-  updatedAt:Date.now()
-});
-
-function rolloverDayIfNeeded(s){
-  const today=dayKey(Date.now());
-  if(s.lastDay<today){
-    for(let k in I){
-      s.dailyCandles[k].push({t:s.lastDay*86400000-19800000, o:s.dayOpen[k], h:s.dayHigh[k], l:s.dayLow[k], c:s.prices[k], v:s.dayVol[k]});
-      if(s.dailyCandles[k].length>MAX_DAILY) s.dailyCandles[k].shift();
-      s.dayOpen[k]=s.prices[k]; s.dayHigh[k]=s.prices[k]; s.dayLow[k]=s.prices[k]; s.dayVol[k]=0;
-    }
-    s.lastDay=today;
+/* ================= QUOTES ================= */
+function mctx(mkt,now,C){
+  if(C[mkt]) return C[mkt];
+  const te=lastActive(mkt,now), d=new Date(te), day0=Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate()); let o,pc;
+  if(mkt==="CR"||mkt==="GL"){ o=day0; pc=day0-1; }
+  else { const s=sess(mkt,te); o=day0+s[0]*60000; let pd=day0-86400000;
+    for(let i=0;i<7;i++){ const w=new Date(pd).getUTCDay(); if(w>0&&w<6) break; pd-=86400000; }
+    pc=pd+sess(mkt,pd)[1]*60000-1; }
+  return C[mkt]={te,o,pc,open:isOpen(mkt,now)};
+}
+function quote(sym,now,C){
+  const i=inst(sym); if(!i) return null;
+  const c=mctx(i.mkt,now,C), p=price(sym,c.te), pc=price(sym,c.pc), span=Math.max(0,c.te-c.o), n=Math.min(30,Math.max(1,Math.floor(span/600000)));
+  let hi=p,lo=p; for(let k=0;k<=n;k++){ const q=price(sym,c.o+span*k/n); if(q>hi)hi=q; if(q<lo)lo=q; }
+  return {i,p,op:price(sym,c.o),hi,lo,vol:Math.round((200000+rnd(hash32(sym))*3e6)*Math.min(1,span/23400000)),chg:+((p-pc)/pc*100).toFixed(2),open:c.open};
+}
+let SNAP=null;
+function snapshot(held){
+  const now=Date.now();
+  if(!SNAP||now-SNAP.at>4000){
+    const syms=[...Object.keys(T).filter(k=>T[k].kind==="EQ"),...derivedList(now)], C={}, o={instruments:{},prices:{},dayOpen:{},dayHigh:{},dayLow:{},dayVol:{},changePct:{}};
+    for(const s of syms){ const q=quote(s,now,C); if(!q) continue; fill(o,s,q); }
+    o.markets={}; for(const k in MN) o.markets[k]=isOpen(k,now);
+    SNAP={at:now,o};
   }
+  const o=SNAP.o, extra=held.filter(s=>!o.instruments[s]&&inst(s));
+  if(!extra.length) return o;
+  const r={...o,instruments:{...o.instruments},prices:{...o.prices},dayOpen:{...o.dayOpen},dayHigh:{...o.dayHigh},dayLow:{...o.dayLow},dayVol:{...o.dayVol},changePct:{...o.changePct}}, C={};
+  for(const s of extra) fill(r,s,quote(s,now,C));
+  return r;
+}
+function fill(o,s,q){
+  const i=q.i; o.instruments[s]={name:i.name,sector:i.sector,grp:i.grp,mkt:i.mkt,ccy:i.ccy,fx:i.fx,lot:i.lot,open:q.open};
+  o.prices[s]=q.p; o.dayOpen[s]=q.op; o.dayHigh[s]=q.hi; o.dayLow[s]=q.lo; o.dayVol[s]=q.vol; o.changePct[s]=q.chg;
 }
 
-function tickOne(s,k,ts){
-  let old=s.prices[k];
-  let np=Math.max(.01, old*(1+(Math.random()-.5)*.0016));
-  s.prices[k]=np;
-  if(np>s.dayHigh[k])s.dayHigh[k]=np;
-  if(np<s.dayLow[k])s.dayLow[k]=np;
-  let vol=Math.round(Math.abs(np-old)/old*5000000+Math.random()*8000);
-  s.dayVol[k]=(s.dayVol[k]||0)+vol;
-  let bucket=Math.floor(ts/CANDLE_MS)*CANDLE_MS;
-  let arr=s.candles[k];
-  let last=arr[arr.length-1];
-  if(last&&last.t===bucket){ last.h=Math.max(last.h,np); last.l=Math.min(last.l,np); last.c=np; last.v+=vol; }
-  else { arr.push({t:bucket,o:old,h:Math.max(old,np),l:Math.min(old,np),c:np,v:vol}); if(arr.length>MAX_CANDLES) arr.shift(); }
-}
-
-function advance(s){
-  rolloverDayIfNeeded(s);
-  const n=Date.now(); let gap=Math.max(0,n-s.updatedAt);
-  if(gap>6*3600000){ s.updatedAt=n-6*3600000; gap=6*3600000; }
-  const steps=Math.min(1500,Math.floor(gap/2500));
-  // only move updatedAt when ticks happen, so fast polling no longer starves the simulation
-  if(steps>0){
-    const stepMs=gap/steps;
-    for(let i=1;i<=steps;i++){ const ts=s.updatedAt+i*stepMs; if(open(ts)) for(let sym in I) tickOne(s,sym,ts); }
-    s.updatedAt=n;
-  }
-  return s;
-}
-
+/* ================= CANDLES ================= */
 function aggC(arr,mins){
   if(mins<=1) return arr; const ms=mins*60000,out=[]; let cur=null;
   for(const c of arr){ const b=Math.floor(c.t/ms)*ms;
@@ -93,225 +160,171 @@ function aggC(arr,mins){
     else { cur.h=Math.max(cur.h,c.h); cur.l=Math.min(cur.l,c.l); cur.c=c.c; cur.v+=c.v||0; } }
   if(cur) out.push(cur); return out;
 }
-// ---------- News (live RSS, cached 4 min in KV) ----------
-const FEEDS=[
- ["India","https://news.google.com/rss/search?q=Sensex+OR+Nifty+OR+%22Indian+stock+market%22+when:1d&hl=en-IN&gl=IN&ceid=IN:en"],
- ["Global","https://news.google.com/rss/search?q=%22Wall+Street%22+OR+%22global+markets%22+OR+%22stock+market%22+when:1d&hl=en-US&gl=US&ceid=US:en"],
- ["Buzz","https://news.google.com/rss/search?q=%22stocks+to+watch%22+OR+%22buzzing+stocks%22+OR+rumour+India+when:1d&hl=en-IN&gl=IN&ceid=IN:en"]];
-const POS=/\b(rally|rallies|surge|surges|jump|jumps|gain|gains|rise|rises|soar|soars|record high|bullish|upbeat|rebound|climb|climbs|advance|advances|boost)\b/i;
-const NEG=/\b(fall|falls|drop|drops|slump|slumps|plunge|plunges|crash|tumble|tumbles|sink|sinks|decline|declines|slide|slides|bearish|selloff|sell-off|losses|weak|fear|fears)\b/i;
-const dec=x=>x.replace(/<!\[CDATA\[|\]\]>/g,"").replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/<[^>]+>/g,"").trim();
-async function loadNews(env){
-  const cached=await env.USERS_KV.get("news:cache",{type:"json"});
-  if(cached&&Date.now()-cached.at<240000) return cached.data;
-  const all=[];
-  await Promise.all(FEEDS.map(async([cat,url])=>{ try{
-    const x=await (await fetch(url,{headers:{"user-agent":"Mozilla/5.0"}})).text(), items=[];
-    for(const m of x.matchAll(/<item>([\s\S]*?)<\/item>/g)){ const b=m[1];
-      const g=t=>{const q=b.match(new RegExp("<"+t+"[^>]*>([\\s\\S]*?)</"+t+">")); return q?dec(q[1]):"";};
-      let title=g("title"), source=g("source"); if(source&&title.endsWith(" - "+source)) title=title.slice(0,-(source.length+3));
-      items.push({id:cat+":"+title.slice(0,80),cat,title,link:g("link"),source,ts:Date.parse(g("pubDate"))||Date.now(),sent:(POS.test(title)?1:0)-(NEG.test(title)?1:0)}); }
-    all.push(...items.sort((a,b)=>b.ts-a.ts).slice(0,15));
-  }catch(e){} }));
-  if(!all.length) return cached?cached.data:{items:[],outlook:null};
-  all.sort((a,b)=>b.ts-a.ts);
-  let up=0,down=0; all.forEach(i=>{ if(i.cat!=="Buzz"){ if(i.sent>0)up++; else if(i.sent<0)down++; } });
-  const label=up>down*1.3?"Bullish":down>up*1.3?"Bearish":"Mixed";
-  const data={items:all,outlook:{label,up,down}};
-  await env.USERS_KV.put("news:cache",JSON.stringify({at:Date.now(),data}),{expirationTtl:600});
-  return data;
+function minuteCandle(sym,t,hs){
+  const o=price(sym,t),c=price(sym,t+59999); let h=Math.max(o,c),l=Math.min(o,c);
+  for(let k=1;k<6;k++){ const q=price(sym,t+k*10000); if(q>h)h=q; if(q<l)l=q; }
+  return {t,o,h,l,c,v:Math.round(500+rnd((hs+(t/60000|0))>>>0)*4000)};
 }
-
-function validCandle(c){
-  return c && Number.isFinite(Number(c.t)) && Number.isFinite(Number(c.o)) &&
-    Number.isFinite(Number(c.h)) && Number.isFinite(Number(c.l)) &&
-    Number.isFinite(Number(c.c));
+function candlesFor(sym,tf){
+  const i=inst(sym), now=Date.now(), c=mctx(i.mkt,now,{}), need=Math.min(9000,Math.max(380,tf*150)), mins=[], hs=hash32(sym);
+  let t=Math.floor(c.te/60000)*60000, g=0;
+  while(mins.length<need&&g++<70000){ if(isOpen(i.mkt,t)) mins.push(t); t-=60000; }
+  mins.reverse();
+  return aggC(mins.map(x=>minuteCandle(sym,x,hs)),tf).slice(-(tf===1?380:300));
 }
-function validSeries(a){
-  return Array.isArray(a) && a.length>0 && a.every(validCandle);
-}
-function repairState(s){
-  const fresh=seed();
-  const repaired={
-    cash:Number.isFinite(Number(s.cash))?Number(s.cash):fresh.cash,
-    positions:s.positions&&typeof s.positions==="object"?s.positions:{},
-    orders:Array.isArray(s.orders)?s.orders:[],
-    prices:s.prices&&typeof s.prices==="object"?s.prices:fresh.prices,
-    dayOpen:s.dayOpen&&typeof s.dayOpen==="object"?s.dayOpen:fresh.dayOpen,
-    dayHigh:s.dayHigh&&typeof s.dayHigh==="object"?s.dayHigh:fresh.dayHigh,
-    dayLow:s.dayLow&&typeof s.dayLow==="object"?s.dayLow:fresh.dayLow,
-    dayVol:s.dayVol&&typeof s.dayVol==="object"?s.dayVol:fresh.dayVol,
-    candles:{},
-    dailyCandles:{},
-    lastDay:Number.isFinite(Number(s.lastDay))?Number(s.lastDay):fresh.lastDay,
-    practice:false,
-    updatedAt:Number.isFinite(Number(s.updatedAt))?Number(s.updatedAt):Date.now()
-  };
-  for(const k in I){
-    repaired.candles[k]=validSeries(s.candles&&s.candles[k]) ? s.candles[k].map(c=>({...c,v:Number.isFinite(Number(c.v))?Number(c.v):0})) : fresh.candles[k];
-    repaired.dailyCandles[k]=Array.isArray(s.dailyCandles&&s.dailyCandles[k]) ?
-      s.dailyCandles[k].filter(validCandle).map(c=>({...c,v:Number.isFinite(Number(c.v))?Number(c.v):0})) : [];
-    if(!Number.isFinite(Number(repaired.prices[k]))) repaired.prices[k]=I[k].price;
-    if(repaired.candles[k].length<1000){ const f=repaired.candles[k][0]; repaired.candles[k]=histCandles(f.o,1500,CANDLE_MS,f.t,.003,15000).concat(repaired.candles[k]); }
-    if(repaired.dailyCandles[k].length<1000){ repaired.dailyCandles[k]=histCandles(Number.isFinite(Number(repaired.dayOpen[k]))?repaired.dayOpen[k]:I[k].price,1825,86400000,dayKey(Date.now())*86400000-19800000,.02,2000000); }
-    if(!Number.isFinite(Number(repaired.dayOpen[k]))) repaired.dayOpen[k]=repaired.prices[k];
-    if(!Number.isFinite(Number(repaired.dayHigh[k]))) repaired.dayHigh[k]=repaired.prices[k];
-    if(!Number.isFinite(Number(repaired.dayLow[k]))) repaired.dayLow[k]=repaired.prices[k];
-    if(!Number.isFinite(Number(repaired.dayVol[k]))) repaired.dayVol[k]=0;
+function dailyFor(sym,days){
+  const i=inst(sym), now=Date.now(), out=[], day0=Math.floor(now/86400000)*86400000, hs=hash32(sym);
+  if(i.kind!=="EQ") days=Math.min(days,120);
+  for(let k=days;k>=0;k--){
+    const ds=day0-k*86400000, w=new Date(ds).getUTCDay(); let o,c;
+    if(i.mkt==="CR"){ o=ds; c=ds+86399999; }
+    else if(i.mkt==="GL"){ if(w===0||w===6) continue; o=ds; c=ds+86399999; }
+    else { if(w===0||w===6) continue; const s=sess(i.mkt,ds); o=ds+s[0]*60000; c=ds+s[1]*60000-1; }
+    if(o>now) continue; c=Math.min(c,now);
+    const O=price(sym,o),C=price(sym,c); let h=Math.max(O,C),l=Math.min(O,C);
+    for(let j=1;j<8;j++){ const q=price(sym,o+(c-o)*j/8); if(q>h)h=q; if(q<l)l=q; }
+    out.push({t:o,o:O,h,l,c:C,v:Math.round(1e6+rnd((hs+k)>>>0)*5e6)});
   }
-  return repaired;
+  return out;
 }
 
+/* ================= WALLET (per-user Durable Object) ================= */
 export class MarketState{
-  constructor(state){this.state=state;this.mem=null;this.lastBulk=0}
+  constructor(state){this.state=state;this.mem=null}
   async get(){
     if(this.mem) return this.mem;
-    let m=await this.state.storage.get("state");
-    if(!m) return repairState(seed());
-    if(!m.candles){ // split storage: one key per symbol (keeps every value well under the size limit)
-      const keys=[]; for(const k in I) keys.push("c:"+k,"d:"+k);
-      const got=await this.state.storage.get(keys);
-      m.candles={}; m.dailyCandles={};
-      for(const k in I){ m.candles[k]=got.get("c:"+k)||[]; m.dailyCandles[k]=got.get("d:"+k)||[]; }
+    let s=await this.state.storage.get("state");
+    if(!s) s={cash:START_CASH,positions:{},orders:[]};
+    else if(s.prices||s.candles||s.dayOpen){ // migrate old per-user simulation state
+      const ks=[]; for(const k of Object.keys(s.prices||{})) ks.push("c:"+k,"d:"+k);
+      try{ if(ks.length) await this.state.storage.delete(ks); }catch(e){}
+      s={cash:s.cash,positions:s.positions||{},orders:s.orders||[]}; await this.state.storage.put("state",s);
     }
-    return repairState(m);
+    return this.mem=s;
   }
-  async put(s,force){
-    this.mem=s;
-    const {candles,dailyCandles,...meta}=s; const ent={state:meta}, now=Date.now();
-    if(force||now-this.lastBulk>20000){ for(const k in I){ ent["c:"+k]=candles[k]; ent["d:"+k]=dailyCandles[k]; } this.lastBulk=now; }
-    await this.state.storage.put(ent); return s;
-  }
+  async put(s){this.mem=s;await this.state.storage.put("state",s);}
   async fetch(req){
-    let s=advance(await this.get()), u=new URL(req.url);
-
+    const s=await this.get(), u=new URL(req.url);
     if(u.pathname==="/api/state"&&req.method==="GET"){
-      await this.put(s);
-      let change={};
-      for(let k in I) change[k]=+(((s.prices[k]-s.dayOpen[k])/s.dayOpen[k])*100).toFixed(2);
-      return json({ok:true,onlineOnly:true,serverTime:new Date().toISOString(),marketOpen:open(Date.now()),cash:s.cash,positions:s.positions,orders:s.orders.slice(-100),prices:s.prices,dayOpen:s.dayOpen,dayHigh:s.dayHigh,dayLow:s.dayLow,dayVol:s.dayVol,changePct:change,instruments:I});
-    }
-    if(u.pathname==="/api/candles"&&req.method==="GET"){
-      let sym=String(u.searchParams.get("symbol")||"").toUpperCase();
-      if(!I[sym]) return json({ok:false,error:"Unknown instrument"},400);
-      await this.put(s);
-      const tf=Math.max(1,parseInt(u.searchParams.get("tf"))||1);
-      return json({ok:true,symbol:sym,tf,candles:aggC(s.candles[sym]||[],tf).slice(-400)});
-    }
-    if(u.pathname==="/api/daily"&&req.method==="GET"){
-      let sym=String(u.searchParams.get("symbol")||"").toUpperCase();
-      if(!I[sym]) return json({ok:false,error:"Unknown instrument"},400);
-      await this.put(s);
-      const hist=[...(s.dailyCandles[sym]||[]), {t:Date.now(), o:s.dayOpen[sym], h:s.dayHigh[sym], l:s.dayLow[sym], c:s.prices[sym], v:s.dayVol[sym]}];
-      const days=Math.min(2000,parseInt(u.searchParams.get("days"))||365), y=hist.slice(-365);
-      return json({ok:true,symbol:sym,daily:hist.slice(-days),hi52:Math.max(...y.map(c=>c.h)),lo52:Math.min(...y.map(c=>c.l))});
+      const snap=snapshot(Object.keys(s.positions));
+      return json({ok:true,serverTime:new Date().toISOString(),marketOpen:snap.markets.IN,markets:snap.markets,cash:s.cash,positions:s.positions,orders:s.orders.slice(-100),...snap});
     }
     if(u.pathname==="/api/order"&&req.method==="POST"){
-      let b; try{b=await req.json()}catch{return json({ok:false,error:"Invalid JSON"},400)};
-      let sym=String(b.symbol||"").toUpperCase(),side=String(b.side||"").toUpperCase(),q=Number(b.qty),x=I[sym];
-      if(!x)return json({ok:false,error:"Unknown instrument"},400);
-      if(!["BUY","SELL"].includes(side)||!Number.isInteger(q)||q<=0||q%x.lot)return json({ok:false,error:"Quantity must be a positive multiple of the MarketIQ game lot size ("+x.lot+")."},400);
-      s=advance(s);
-      let p=s.prices[sym],value=p*q,fee=value*.0005,pos=s.positions[sym]||{qty:0,avg:0};
+      let b; try{b=await req.json()}catch{return json({ok:false,error:"Invalid JSON"},400)}
+      const sym=String(b.symbol||"").toUpperCase(), side=String(b.side||"").toUpperCase(), q=Number(b.qty), ins=inst(sym);
+      if(!ins) return json({ok:false,error:"Unknown instrument"},400);
+      if(!["BUY","SELL"].includes(side)||!Number.isInteger(q)||q<=0||q%ins.lot) return json({ok:false,error:"Quantity must be a positive multiple of the lot size ("+ins.lot+")."},400);
+      const now=Date.now();
+      if(!isOpen(ins.mkt,now)) return json({ok:false,error:MN[ins.mkt]+" is closed right now. "+HRS[ins.mkt]},400);
+      if(ins.exp&&now>=ins.exp) return json({ok:false,error:"This contract has expired."},400);
+      const p=price(sym,now), valN=p*q, valI=valN*ins.fx, fee=valI*FEE, pos=s.positions[sym]||{qty:0,avg:0};
       if(side==="BUY"){
-        if(s.cash<value+fee)return json({ok:false,error:"Insufficient virtual cash"},400);
-        pos.avg=(pos.avg*pos.qty+value)/(pos.qty+q); pos.qty+=q; s.cash-=value+fee;
+        if(s.cash<valI+fee) return json({ok:false,error:"Insufficient virtual cash"},400);
+        pos.avg=(pos.avg*pos.qty+valN)/(pos.qty+q); pos.qty+=q; s.cash-=valI+fee;
       } else {
-        if(pos.qty<q)return json({ok:false,error:"Insufficient virtual units"},400);
-        pos.qty-=q; s.cash+=value-fee; if(!pos.qty)delete s.positions[sym];
+        if(pos.qty<q) return json({ok:false,error:"Insufficient holdings (short selling not enabled)"},400);
+        pos.qty-=q; s.cash+=valI-fee; if(!pos.qty) delete s.positions[sym];
       }
-      if(pos.qty)s.positions[sym]=pos;
-      let o={id:crypto.randomUUID(),symbol:sym,side,qty:q,price:p,value,brokerage:fee,time:new Date().toISOString(),status:"FILLED",virtual:true};
-      s.orders.push(o); await this.put(s);
+      if(pos.qty) s.positions[sym]=pos;
+      const o={id:crypto.randomUUID(),symbol:sym,side,qty:q,price:p,ccy:ins.ccy,value:valI,brokerage:fee,time:new Date().toISOString(),status:"FILLED",virtual:true};
+      s.orders.push(o); if(s.orders.length>300) s.orders.shift(); await this.put(s);
       return json({ok:true,order:o,cash:s.cash,positions:s.positions});
     }
-    if(u.pathname==="/api/settings"&&req.method==="POST"){
-      let b; try{b=await req.json()}catch{b={}}
-      s.practice=!!b.practice; await this.put(s);
-      return json({ok:true,practice:s.practice,marketOpen:open(Date.now())});
+    if(u.pathname==="/api/topup"&&req.method==="POST"){
+      if(s.cash>=50000000) return json({ok:false,error:"Virtual wallet is already above ₹5 crore"},400);
+      s.cash+=10000000; await this.put(s); return json({ok:true,cash:s.cash});
     }
-    if(u.pathname==="/api/reset"&&req.method==="POST"){ await this.put(repairState(seed()),true); return json({ok:true,reset:true}); }
-    if(u.pathname==="/api/seed-demo"&&req.method==="POST"){
-      const now=Date.now();
-      for(let k in I){
-        let p=I[k].price*(0.9+Math.random()*0.2);
-        const intraday=[]; const start=now-390*CANDLE_MS;
-        for(let i=0;i<390;i++){ const o=p; p=Math.max(.01,p*(1+(Math.random()-.5)*.003)); const h=Math.max(o,p)*(1+Math.random()*.001), l=Math.min(o,p)*(1-Math.random()*.001); intraday.push({t:start+i*CANDLE_MS,o,h,l,c:p,v:Math.round(Math.random()*15000+2000)}); }
-        s.candles[k]=intraday;
-        s.prices[k]=p;
-        s.dayOpen[k]=intraday[0].o; s.dayHigh[k]=Math.max(...intraday.map(c=>c.h)); s.dayLow[k]=Math.min(...intraday.map(c=>c.l)); s.dayVol[k]=intraday.reduce((a,c)=>a+c.v,0);
-        const daily=[]; let dp=I[k].price*(0.85+Math.random()*0.3);
-        for(let d=60;d>=1;d--){ const o=dp; dp=Math.max(.01,dp*(1+(Math.random()-.5)*.02)); const h=Math.max(o,dp)*(1+Math.random()*.01), l=Math.min(o,dp)*(1-Math.random()*.01); daily.push({t:now-d*86400000,o,h,l,c:dp,v:Math.round(Math.random()*2000000+300000)}); }
-        s.dailyCandles[k]=daily;
-      }
-      s.updatedAt=now; await this.put(s);
-      return json({ok:true,seeded:true});
-    }
+    if(u.pathname==="/api/reset"&&req.method==="POST"){ await this.put({cash:START_CASH,positions:{},orders:[]}); return json({ok:true,reset:true}); }
     return json({ok:false,error:"Not found"},404);
   }
 }
 
+/* ================= NEWS (Google News RSS, sectioned) ================= */
+const SECTIONS=[
+ ["India","Sensex OR Nifty OR \"Indian stock market\" OR \"Indian shares\""],["US","\"Wall Street\" OR \"S&P 500\" OR Nasdaq OR \"Dow Jones\""],
+ ["Europe","\"European stocks\" OR FTSE OR DAX OR STOXX"],["Asia","Nikkei OR \"Hang Seng\" OR \"Asian markets\" OR \"China stocks\""],
+ ["Commodities","\"gold price\" OR \"crude oil\" OR Brent OR \"silver price\""],["Forex","rupee OR \"dollar index\" OR forex OR \"currency market\""],
+ ["Crypto","bitcoin OR ethereum OR \"crypto market\""],["IPO","IPO OR \"stocks to watch\" OR \"buzzing stocks\" India"],["Economy","RBI OR inflation OR \"Federal Reserve\" OR \"interest rate\" OR GDP"]];
+const POS=/\b(rally|rallies|surge|surges|jump|jumps|gain|gains|rise|rises|soar|soars|record high|bullish|upbeat|rebound|climb|climbs|advance|advances|boost)\b/i;
+const NEG=/\b(fall|falls|drop|drops|slump|slumps|plunge|plunges|crash|tumble|tumbles|sink|sinks|decline|declines|slide|slides|bearish|selloff|sell-off|losses|weak|fear|fears)\b/i;
+const dec=x=>x.replace(/<!\[CDATA\[|\]\]>/g,"").replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/<[^>]+>/g,"").trim();
+async function feedItems(cat,q,n){
+  const url="https://news.google.com/rss/search?q="+encodeURIComponent(q+" when:2d")+"&hl=en-IN&gl=IN&ceid=IN:en";
+  const x=await (await fetch(url,{headers:{"user-agent":"Mozilla/5.0"},cf:{cacheTtl:180,cacheEverything:true}})).text(), items=[];
+  for(const m of x.matchAll(/<item>([\s\S]*?)<\/item>/g)){ const b=m[1];
+    const g=t=>{const r=b.match(new RegExp("<"+t+"[^>]*>([\\s\\S]*?)</"+t+">"));return r?dec(r[1]):"";};
+    let title=g("title"), source=g("source"); if(source&&title.endsWith(" - "+source)) title=title.slice(0,-(source.length+3));
+    items.push({id:cat+":"+title.slice(0,80),cat,title,link:g("link"),source,ts:Date.parse(g("pubDate"))||Date.now(),sent:(POS.test(title)?1:0)-(NEG.test(title)?1:0)}); }
+  return items.sort((a,b)=>b.ts-a.ts).slice(0,n);
+}
+async function loadNews(env){
+  const cached=await env.USERS_KV.get("news:cache2",{type:"json"});
+  if(cached&&Date.now()-cached.at<240000) return cached.data;
+  const all=[];
+  await Promise.all(SECTIONS.map(async([c,q])=>{ try{ all.push(...await feedItems(c,q,10)); }catch(e){} }));
+  if(!all.length) return cached?cached.data:{items:[],outlook:null};
+  all.sort((a,b)=>b.ts-a.ts);
+  let up=0,down=0; all.forEach(i=>{ if(["India","US","Europe","Asia"].includes(i.cat)){ if(i.sent>0)up++; else if(i.sent<0)down++; } });
+  const label=up>down*1.3?"Bullish":down>up*1.3?"Bearish":"Mixed";
+  const data={items:all,outlook:{label,up,down}};
+  await env.USERS_KV.put("news:cache2",JSON.stringify({at:Date.now(),data}),{expirationTtl:900});
+  return data;
+}
+
+/* ================= ROUTER ================= */
 export default{
   async fetch(req,env){
-    if(req.method==="OPTIONS")return new Response(null,{headers:CORS});
-    let url=new URL(req.url);
-
-    // ---- Auth endpoints (use USERS_KV, not Durable Object) ----
-    if(url.pathname==="/api/auth/signup"&&req.method==="POST"){
-      let b; try{b=await req.json()}catch{return json({ok:false,error:"Invalid JSON"},400)};
-      let username=String(b.username||"").trim().toLowerCase();
-      let password=String(b.password||"");
+    if(req.method==="OPTIONS") return new Response(null,{headers:CORS});
+    const url=new URL(req.url), P=url.pathname;
+    if(P==="/api/auth/signup"&&req.method==="POST"){
+      let b; try{b=await req.json()}catch{return json({ok:false,error:"Invalid JSON"},400)}
+      const username=String(b.username||"").trim().toLowerCase(), password=String(b.password||"");
       if(!/^[a-z0-9_]{3,20}$/.test(username)) return json({ok:false,error:"Username must be 3-20 chars: letters, numbers, underscore only"},400);
       if(password.length<6) return json({ok:false,error:"Password must be at least 6 characters"},400);
-      const existing=await env.USERS_KV.get("user:"+username);
-      if(existing) return json({ok:false,error:"Username already taken"},400);
-      const salt=crypto.randomUUID();
-      const hash=await hashPassword(password,salt);
-      await env.USERS_KV.put("user:"+username, JSON.stringify({hash,salt,createdAt:Date.now()}));
-      const token=crypto.randomUUID();
-      await env.USERS_KV.put("session:"+token, username, {expirationTtl:60*60*24*365});
+      if(await env.USERS_KV.get("user:"+username)) return json({ok:false,error:"Username already taken"},400);
+      const salt=crypto.randomUUID(), hash=await hashPassword(password,salt);
+      await env.USERS_KV.put("user:"+username,JSON.stringify({hash,salt,createdAt:Date.now()}));
+      const token=crypto.randomUUID(); await env.USERS_KV.put("session:"+token,username,{expirationTtl:31536000});
       return json({ok:true,token,username});
     }
-    if(url.pathname==="/api/auth/login"&&req.method==="POST"){
-      let b; try{b=await req.json()}catch{return json({ok:false,error:"Invalid JSON"},400)};
-      let username=String(b.username||"").trim().toLowerCase();
-      let password=String(b.password||"");
-      const raw=await env.USERS_KV.get("user:"+username);
-      if(!raw) return json({ok:false,error:"Invalid username or password"},400);
-      const rec=JSON.parse(raw);
-      const hash=await hashPassword(password,rec.salt);
-      if(hash!==rec.hash) return json({ok:false,error:"Invalid username or password"},400);
-      const token=crypto.randomUUID();
-      await env.USERS_KV.put("session:"+token, username, {expirationTtl:60*60*24*365});
+    if(P==="/api/auth/login"&&req.method==="POST"){
+      let b; try{b=await req.json()}catch{return json({ok:false,error:"Invalid JSON"},400)}
+      const username=String(b.username||"").trim().toLowerCase(), password=String(b.password||"");
+      const raw=await env.USERS_KV.get("user:"+username); if(!raw) return json({ok:false,error:"Invalid username or password"},400);
+      const rec=JSON.parse(raw); if(await hashPassword(password,rec.salt)!==rec.hash) return json({ok:false,error:"Invalid username or password"},400);
+      const token=crypto.randomUUID(); await env.USERS_KV.put("session:"+token,username,{expirationTtl:31536000});
       return json({ok:true,token,username});
     }
-    if(url.pathname==="/api/auth/me"&&req.method==="GET"){
-      const username=await resolveUser(req,env);
-      if(!username) return json({ok:false,error:"Not logged in"},401);
-      return json({ok:true,username});
+    if(P==="/api/auth/me"&&req.method==="GET"){ const u=await resolveUser(req,env); return u?json({ok:true,username:u}):json({ok:false,error:"Not logged in"},401); }
+    if(P==="/api/news"&&req.method==="GET"){
+      const q=(url.searchParams.get("q")||"").trim().slice(0,80);
+      if(q){ try{ return json({ok:true,query:q,items:await feedItems("Search",q,25)}); }catch(e){ return json({ok:true,query:q,items:[]}); } }
+      return json({ok:true,...await loadNews(env)});
     }
-
-    if(url.pathname==="/api/news"&&req.method==="GET"){ const d=await loadNews(env); return json({ok:true,...d}); }
-
-    // ---- Game endpoints (require session) ----
-    if(url.pathname.startsWith("/api/")){
-      const username=await resolveUser(req,env);
-      if(!username) return json({ok:false,error:"Not logged in"},401);
-      let id=env.MARKET_STATE.idFromName("player-"+username);
-      return env.MARKET_STATE.get(id).fetch(req);
+    if(P.startsWith("/api/")){
+      const username=await resolveUser(req,env); if(!username) return json({ok:false,error:"Not logged in"},401);
+      if(P==="/api/candles"||P==="/api/daily"){
+        const sym=String(url.searchParams.get("symbol")||"").toUpperCase(); if(!inst(sym)) return json({ok:false,error:"Unknown instrument"},400);
+        if(P==="/api/candles"){ const tf=Math.max(1,parseInt(url.searchParams.get("tf"))||1); return json({ok:true,symbol:sym,tf,candles:candlesFor(sym,tf)}); }
+        const days=Math.min(2000,parseInt(url.searchParams.get("days"))||365), y=dailyFor(sym,365);
+        return json({ok:true,symbol:sym,daily:days>365?dailyFor(sym,days):y.slice(-days),hi52:Math.max(...y.map(c=>c.h)),lo52:Math.min(...y.map(c=>c.l))});
+      }
+      if(P==="/api/prefs"){
+        if(req.method==="GET"){ const r=await env.USERS_KV.get("prefs:"+username,{type:"json"}); return json({ok:true,prefs:r||{}}); }
+        let b; try{b=await req.json()}catch{b={}}
+        const prefs={watch:Array.isArray(b.watch)?b.watch.slice(0,100).map(String):[],fs:Math.min(1.3,Math.max(.85,Number(b.fs)||1))};
+        await env.USERS_KV.put("prefs:"+username,JSON.stringify(prefs)); return json({ok:true});
+      }
+      return env.MARKET_STATE.get(env.MARKET_STATE.idFromName("player-"+username)).fetch(req);
     }
     return new Response("MarketIQ API server is running.",{headers:CORS});
   }
 }
-
 async function hashPassword(password,salt){
-  const data=new TextEncoder().encode(salt+":"+password);
-  const buf=await crypto.subtle.digest("SHA-256",data);
+  const buf=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(salt+":"+password));
   return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,"0")).join("");
 }
 async function resolveUser(req,env){
-  const auth=req.headers.get("Authorization")||"";
-  const token=auth.startsWith("Bearer ")?auth.slice(7):null;
-  if(!token) return null;
-  return await env.USERS_KV.get("session:"+token);
+  const a=req.headers.get("Authorization")||""; const token=a.startsWith("Bearer ")?a.slice(7):null;
+  return token?await env.USERS_KV.get("session:"+token):null;
 }
