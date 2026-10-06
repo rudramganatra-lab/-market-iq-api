@@ -536,7 +536,7 @@ async function handle(req,env,url){
 export default{
   async fetch(req,env){
     const o=req.headers.get("Origin")||"", allow=(env.ALLOWED_ORIGINS?env.ALLOWED_ORIGINS.split(",").map(x=>x.trim()):DEFAULT_ORIGINS);
-    const cors={"Access-Control-Allow-Methods":"GET,POST,OPTIONS","Access-Control-Allow-Headers":"Content-Type, Authorization, X-Admin-Key","Access-Control-Max-Age":"600","Vary":"Origin"}; if(allow.includes(o)) cors["Access-Control-Allow-Origin"]=o;
+    const cors={"Access-Control-Allow-Methods":"GET,POST,OPTIONS","Access-Control-Allow-Headers":"Content-Type, Authorization, X-Admin-Key","Access-Control-Max-Age":"600","Vary":"Origin"}; if(allow.includes(o)||/^https:\/\/[a-z0-9-]+\.rudramganatra-2ee\.workers\.dev$/.test(o)) cors["Access-Control-Allow-Origin"]=o; // your own workers.dev sites are always allowed
     if(req.method==="OPTIONS") return new Response(null,{status:204,headers:{...cors,...SEC}});
     let res; try{ res=await handle(req,env,new URL(req.url)); }catch(e){ console.error("handler error",e&&e.stack||e); res=J({ok:false,error:"Server error"},500); } // details go to server logs only, never to the client
     const h=new Headers(res.headers); for(const k in cors) h.set(k,cors[k]); for(const k in SEC) h.set(k,SEC[k]); return new Response(res.body,{status:res.status,headers:h});
