@@ -208,12 +208,27 @@ function minuteCandle(sym,t,hs,i,vb,vol){
   return {t,o,h,l,c,v:Math.max(1,Math.round(vb*ushape(i,t)*(0.4+rnd((hs+(t/60000|0))>>>0)*1.2)*mult))};
 }
 function sparkFor(sym){ const i=inst(sym), c=mctx(i.mkt,Date.now(),{}), a=[]; for(let k=0;k<30;k++) a.push(price(sym,c.te-86400000*(1-k/29))); return a; }
-function candlesFor(sym,tf){
-  const i=inst(sym), vb=vbase(sym), vol=(i.kind==="EQ"?i:T[i.und]).vol, now=Date.now(), c=mctx(i.mkt,now,{}), need=Math.min(9000,Math.max(380,tf*150)), mins=[], hs=hash32(sym);
-  let t=Math.floor(c.te/60000)*60000, g=0;
-  while(mins.length<need&&g++<70000){ if(isOpen(i.mkt,t)) mins.push(t); t-=60000; }
-  mins.reverse();
-  return aggC(mins.map(x=>minuteCandle(sym,x,hs,i,vb,vol)),tf).slice(-(tf===1?380:300));
+function bucketCandle(sym,i,lo,hi,hs,vb,vol,tf){
+  const min=(hi-lo)/60000, n=tf===1?8:Math.min(14,8+Math.floor(Math.log2(tf))), o=price(sym,lo), c=price(sym,hi-1); let h=Math.max(o,c),l=Math.min(o,c);
+  for(let k=1;k<n;k++){ const q=price(sym,lo+(hi-lo)*k/n); if(q>h)h=q; if(q<l)l=q; }
+  const mult=1+Math.min(4,Math.abs(Math.log(c/o))/(vol*0.03*Math.sqrt(Math.max(1,min))))*0.8, rf=tf===1?(0.4+rnd((hs+(lo/60000|0))>>>0)*1.2):(0.8+rnd((hs+(lo/60000|0))>>>0)*0.4);
+  return {t:lo,o,h,l,c,v:Math.max(1,Math.round(vb*ushape(i,(lo+hi)/2)*min*rf*mult))};
+}
+// Full, gap-free history: every bucket of the last N trading sessions (capped ~700 candles so it stays fast)
+const DEFSESS=tf=>tf<=1?2:tf<=3?4:tf<=5?6:tf<=15?15:tf<=30?22:40;
+function candlesFor(sym,tf,wantSess,_r){
+  const i=inst(sym), vb=vbase(sym), vol=(i.kind==="EQ"?i:T[i.und]).vol, now=Date.now(), c=mctx(i.mkt,now,{}), hs=hash32(sym), ms=tf*60000, te=Math.floor(c.te/60000)*60000+60000, full=i.mkt==="CR"||i.mkt==="GL";
+  wantSess=Math.max(1,Math.min(60,wantSess||DEFSESS(tf)));
+  const dayLen=full?1440:(()=>{const s=sess(i.mkt,te-1);return s[1]-s[0];})(), perDay=Math.max(1,Math.ceil(dayLen/tf)), nDays=Math.max(1,Math.min(wantSess,Math.floor(700/perDay)||1));
+  const out=[]; let day=Math.floor((te-1)/86400000)*86400000, got=0, guard=0;
+  while((got<nDays||(out.length<150&&got<Math.min(wantSess,3)))&&guard++<120){
+    const w=new Date(day).getUTCDay(), trade=i.mkt==="CR"||(w>0&&w<6);
+    if(trade){ const s=full?[0,1440]:sess(i.mkt,day), a=day+s[0]*60000, z=Math.min(day+s[1]*60000,te);
+      if(z>a){ const dc=[]; for(let b=Math.floor(a/ms)*ms;b<z;b+=ms){ const lo=Math.max(b,a), hi=Math.min(b+ms,z); if(hi>lo) dc.push(bucketCandle(sym,i,lo,hi,hs,vb,vol,tf)); } out.unshift(...dc); got++; } }
+    day-=86400000;
+  }
+  if(!_r&&wantSess<2&&out.length<30) return candlesFor(sym,tf,2,true); // very start of a session: borrow the previous one so the chart is never empty
+  return out;
 }
 function dailyFor(sym,days){
   const i=inst(sym), vb=vbase(sym), now=Date.now(), out=[], day0=Math.floor(now/86400000)*86400000, hs=hash32(sym);
@@ -325,7 +340,7 @@ const NEG=/\b(fall|falls|drop|drops|slump|slumps|plunge|plunges|crash|tumble|tum
 const dec=x=>x.replace(/<!\[CDATA\[|\]\]>/g,"").replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&#0?39;|&apos;/g,"'").replace(/&nbsp;/g," ").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
 const safeUrl=u=>{ try{ const x=new URL(u); return x.protocol==="https:"?x.href:""; }catch{ return ""; } }; // https only: blocks javascript:/data: links
 async function feedItems(cat,url,n){
-  const r=await fetch(url,{headers:{"user-agent":"Mozilla/5.0 (compatible; BazarBot/1.0)"},cf:{cacheTtl:180,cacheEverything:true}}); if(!r.ok) return [];
+  const r=await fetch(url,{headers:{"user-agent":"Mozilla/5.0 (compatible; StockBullBot/1.0)"},cf:{cacheTtl:180,cacheEverything:true}}); if(!r.ok) return [];
   const x=(await r.text()).slice(0,600000), items=[], isG=url.includes("news.google.com");
   for(const m of x.matchAll(/<item[\s>]([\s\S]*?)<\/item>/g)){ const b=m[1];
     const g=t=>{const q=b.match(new RegExp("<"+t+"[^>]*>([\\s\\S]*?)</"+t+">","i"));return q?q[1]:"";};
@@ -401,7 +416,7 @@ function localAI(msg,snap,w){
   if(/top|mover|gainer|loser|trend/.test(q)){ const l=Object.keys(ins).filter(x=>["India","USA"].includes(ins[x].grp)).sort((a,b)=>Math.abs(snap.changePct[b])-Math.abs(snap.changePct[a])).slice(0,4); out.push("Biggest movers right now: "+l.map(x=>x+" "+(snap.changePct[x]>=0?"+":"")+snap.changePct[x]+"%").join(", ")+"."); }
   if(/portfolio|holding|my money|cash|p&l|profit|loss/.test(q)){ const n=Object.keys(w.positions).length; out.push("You have ₹"+Math.round(w.cash).toLocaleString("en-IN")+" virtual cash and "+n+" open position"+(n===1?"":"s")+". Open Portfolio from the menu for live P&L."); }
   if(/market|nifty|sensex|today|mood|outlook/.test(q)&&!hit){ const n=snap.changePct.NIFTY50, s=snap.changePct.SENSEX; out.push("NIFTY 50 is "+(n>=0?"up ":"down ")+Math.abs(n)+"% and Sensex "+(s>=0?"up ":"down ")+Math.abs(s)+"% today (simulated). Check the News tab for the headline mood."); emo=n>=0?"happy":"worried"; }
-  if(/^(hi|hello|hey|namaste)/.test(q)) out.push("Hi! I'm BazarAI 🐂 — I explain markets, indicators and risk. Ask me anything, like “what is stop loss?” or “how is TCS doing?”.");
+  if(/^(hi|hello|hey|namaste)/.test(q)) out.push("Hi! I'm BullAI 🐂 — I explain markets, indicators and risk. Ask me anything, like “what is stop loss?” or “how is TCS doing?”.");
   if(/buy|sell|should i|tip|target price|will .* (go|rise|fall)/.test(q)){ out.push("I can't tell you what will happen — nobody can, and prices in this game are simulated. I can help you build a plan: entry, stop-loss, target, and position size."); emo="think"; }
   if(!out.length){ out.push("I'm in demo mode, so I know market basics (stop-loss, SMA/EMA, volume, options, futures, ETFs…), live prices in this game, and your cash. Try: “explain risk reward” or “how is RELIANCE?”."); emo="think"; }
   return {reply:out.join("\n\n"),emotion:emo,mode:"demo"};
@@ -477,7 +492,7 @@ async function handle(req,env,url){
   if(P==="/api/account"&&M==="POST"){
     const b=await readJson(req); if(!b) return J({ok:false,error:"Invalid request"},400);
     if(b.display!==undefined) rec.display=String(b.display).trim().slice(0,30).replace(/[<>&"'`]/g,"")||user;
-    if(b.phone!==undefined){ if(rec.phoneH) return J({ok:false,error:"Mobile number is locked to this account. Contact the Bazar team to change it."},400);
+    if(b.phone!==undefined){ if(rec.phoneH) return J({ok:false,error:"Mobile number is locked to this account. Contact the StockBull team to change it."},400);
       const d=normPhone(b.phone); if(!d) return J({ok:false,error:"Enter a valid 10-digit Indian mobile number"},400); const ph=await phoneHash(env,d);
       if(!rec.uid) rec.uid=b64u(rand(12));
       if(!(await claim(env,"ph:"+ph,rec.uid)).ok) return J({ok:false,error:"This mobile number is already linked to another account."},409); rec.phoneH=ph; rec.phoneMask=mask(d); }
@@ -497,7 +512,7 @@ async function handle(req,env,url){
   if(P==="/api/support"){
     let th=await env.USERS_KV.get("sup:"+user,{type:"json"})||[];
     if(M==="POST"){ const a=await rl(env,"sup:"+user,10,3600); if(!a.ok) return tooMany(a); const b=await readJson(req); const text=String(b&&b.text||"").trim().slice(0,600); if(!text) return J({ok:false,error:"Write a message first"},400);
-      th.push({from:"user",text,ts:Date.now()}); if(th.filter(m=>m.from==="user").length===1) th.push({from:"team",text:"Thanks for reaching out! The Bazar team has your message and will reply here. Please never share your password with anyone — including us.",ts:Date.now()+1});
+      th.push({from:"user",text,ts:Date.now()}); if(th.filter(m=>m.from==="user").length===1) th.push({from:"team",text:"Thanks for reaching out! The StockBull team has your message and will reply here. Please never share your password with anyone — including us.",ts:Date.now()+1});
       th=th.slice(-100); await env.USERS_KV.put("sup:"+user,JSON.stringify(th)); }
     return J({ok:true,thread:th});
   }
@@ -516,14 +531,14 @@ async function handle(req,env,url){
   if(P==="/api/candles"||P==="/api/daily"||P==="/api/spark"){ const a=await rl(env,"dat:"+user,300,60); if(!a.ok) return tooMany(a); }
   if(P==="/api/candles"||P==="/api/daily"){
     const sym=String(url.searchParams.get("symbol")||"").toUpperCase().slice(0,60); if(!/^[A-Z0-9_.\-]+$/.test(sym)||!inst(sym)) return J({ok:false,error:"Unknown instrument"},400);
-    if(P==="/api/candles"){ const tf=Math.min(1440,Math.max(1,parseInt(url.searchParams.get("tf"))||1)); return J({ok:true,symbol:sym,tf,candles:candlesFor(sym,tf)}); }
+    if(P==="/api/candles"){ const tf=Math.min(1440,Math.max(1,parseInt(url.searchParams.get("tf"))||1)); return J({ok:true,symbol:sym,tf,candles:candlesFor(sym,tf,parseInt(url.searchParams.get("sess"))||0)}); }
     const days=Math.min(2000,Math.max(1,parseInt(url.searchParams.get("days"))||365)), y=dailyFor(sym,365);
     return J({ok:true,symbol:sym,daily:days>365?dailyFor(sym,days):y.slice(-days),hi52:Math.max(...y.map(c=>c.h)),lo52:Math.min(...y.map(c=>c.l))});
   }
   if(P==="/api/spark"){ const out={}; for(const x of String(url.searchParams.get("symbols")||"").toUpperCase().split(",").slice(0,16)){ if(/^[A-Z0-9_.\-]{1,60}$/.test(x)&&inst(x)) out[x]=sparkFor(x); } return J({ok:true,spark:out}); }
   if(P==="/api/prefs"){
     if(M==="GET") return J({ok:true,prefs:await env.USERS_KV.get("prefs:"+user,{type:"json"})||{}});
-    const b=await readJson(req,6000)||{}; const prefs={watch:(Array.isArray(b.watch)?b.watch:[]).map(String).filter(x=>/^[A-Z0-9_.\-]{1,60}$/.test(x)).slice(0,100),fs:Math.min(1.3,Math.max(.85,Number(b.fs)||1)),theme:["dark","light","system"].includes(b.theme)?b.theme:"dark",mascot:b.mascot===false?false:true};
+    const b=await readJson(req,6000)||{}; const prefs={watch:(Array.isArray(b.watch)?b.watch:[]).map(String).filter(x=>/^[A-Z0-9_.\-]{1,60}$/.test(x)).slice(0,100),fs:Math.min(1.3,Math.max(.85,Number(b.fs)||1)),theme:["dark","light","system"].includes(b.theme)?b.theme:"light",mascot:b.mascot===false?false:true};
     await env.USERS_KV.put("prefs:"+user,JSON.stringify(prefs)); return J({ok:true});
   }
   if(P==="/api/state"&&M==="GET"||(P==="/api/order"&&M==="POST")||(P==="/api/topup"&&M==="POST")||(P==="/api/reset"&&M==="POST")){
