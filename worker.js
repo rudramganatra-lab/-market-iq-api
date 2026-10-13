@@ -403,6 +403,8 @@ function clean(b){
   return {stock,market:b.market,date:b.date,tf:b.tf,buy:b.buy,sell:b.sell,pnl:Math.round(pnl*100)/100,rr:Math.round(rr*100)/100,learn,disc:b.disc,strat:b.strat,inst:b.inst};
 }
 function adminSeed(env,u){ try{ const a=JSON.parse(env.ADMIN_SEED||"[]"); return Array.isArray(a)?a.find(x=>x&&String(x.username||"").toLowerCase()===u&&typeof x.password==="string"&&x.password.length>=8):null; }catch{ return null; } }
+const canonPh=x=>String(x||"").replace(/[\s\-()+]/g,"");
+function adminPhone(env,raw){ const c=canonPh(raw); if(!/^\d{9,12}$/.test(c)) return ""; try{ const a=JSON.parse(env.ADMIN_SEED||"[]"); return Array.isArray(a)&&a.some(x=>x&&canonPh(x.phone)===c)?c:""; }catch{ return ""; } } // team numbers (ADMIN_SEED secret) may be reused across accounts
 const mask=d=>"+91 ••••••"+d.slice(-4);
 async function newSession(env,user,req){
   const tok=b64u(rand(32)), h=await sha256(tok);
@@ -509,14 +511,14 @@ async function handle(req,env,url){
   if(P==="/api/auth/signup"&&M==="POST"){
     const r0=await rl(env,"su:"+ip,6,3600); if(!r0.ok) return tooMany(r0);
     const b=await readJson(req); if(!b) return J({ok:false,error:"Invalid request"},400);
-    const username=String(b.username||"").trim().toLowerCase(), password=String(b.password||""), display=String(b.display||"").trim().slice(0,30).replace(/[<>&"'`]/g,""), phone=normPhone(b.phone);
+    const username=String(b.username||"").trim().toLowerCase(), password=String(b.password||""), display=String(b.display||"").trim().slice(0,30).replace(/[<>&"'`]/g,""), team=adminPhone(env,b.phone), phone=normPhone(b.phone)||team;
     if(!/^[a-z0-9_]{3,20}$/.test(username)) return J({ok:false,error:"Username must be 3-20 chars: letters, numbers, underscore only"},400);
     const pp=pwProblem(password,username); if(pp) return J({ok:false,error:pp},400);
     if(!phone) return J({ok:false,error:"Enter a valid 10-digit Indian mobile number"},400);
     if(await env.USERS_KV.get("user:"+username)) return J({ok:false,error:"Username already taken"},409);
     const ph=await phoneHash(env,phone), uid=b64u(rand(12));
-    if(!(await claim(env,"ph:"+ph,uid)).ok) return J({ok:false,error:"This mobile number is already linked to another account."},409);
-    if(!(await claim(env,"un:"+username,uid)).ok){ await claim(env,"ph:"+ph,uid,"DELETE"); return J({ok:false,error:"Username already taken"},409); }
+    if(!team&&!(await claim(env,"ph:"+ph,uid)).ok) return J({ok:false,error:"This mobile number is already linked to another account."},409);
+    if(!(await claim(env,"un:"+username,uid)).ok){ if(!team) await claim(env,"ph:"+ph,uid,"DELETE"); return J({ok:false,error:"Username already taken"},409); }
     const rec={...await makePw(password),uid,display:display||username,phoneH:ph,phoneMask:mask(phone),createdAt:Date.now()};
     await env.USERS_KV.put("user:"+username,JSON.stringify(rec));
     return J({ok:true,token:await newSession(env,username,req),username});
@@ -529,7 +531,7 @@ async function handle(req,env,url){
     const seed=adminSeed(env,username);
     if(seed&&ctEq(password,seed.password)&&(!rec||rec.admin)){ // team accounts come from the ADMIN_SEED secret, never from the repo
       if(!rec){ const uid=b64u(rand(12)); if((await claim(env,"un:"+username,uid)).ok){ rec={uid,display:String(seed.display||username).slice(0,30).replace(/[<>&"'`]/g,""),createdAt:Date.now(),admin:true,...(await makePw(password))};
-          const d=normPhone(seed.phone); if(d){ const ph=await phoneHash(env,d); if((await claim(env,"ph:"+ph,uid)).ok){ rec.phoneH=ph; rec.phoneMask=mask(d); } }
+          const d=normPhone(seed.phone)||adminPhone(env,seed.phone); if(d){ rec.phoneH=await phoneHash(env,d); rec.phoneMask=mask(d); }
           await env.USERS_KV.put("user:"+username,JSON.stringify(rec)); } }
       if(rec) return J({ok:true,token:await newSession(env,username,req),username});
     }
@@ -571,9 +573,9 @@ async function handle(req,env,url){
     const b=await readJson(req); if(!b) return J({ok:false,error:"Invalid request"},400);
     if(b.display!==undefined) rec.display=String(b.display).trim().slice(0,30).replace(/[<>&"'`]/g,"")||user;
     if(b.phone!==undefined){ if(rec.phoneH) return J({ok:false,error:"Mobile number is locked to this account. Contact the StockBazar team to change it."},400);
-      const d=normPhone(b.phone); if(!d) return J({ok:false,error:"Enter a valid 10-digit Indian mobile number"},400); const ph=await phoneHash(env,d);
+      const team=adminPhone(env,b.phone), d=normPhone(b.phone)||team; if(!d) return J({ok:false,error:"Enter a valid 10-digit Indian mobile number"},400); const ph=await phoneHash(env,d);
       if(!rec.uid) rec.uid=b64u(rand(12));
-      if(!(await claim(env,"ph:"+ph,rec.uid)).ok) return J({ok:false,error:"This mobile number is already linked to another account."},409); rec.phoneH=ph; rec.phoneMask=mask(d); }
+      if(!team&&!(await claim(env,"ph:"+ph,rec.uid)).ok) return J({ok:false,error:"This mobile number is already linked to another account."},409); rec.phoneH=ph; rec.phoneMask=mask(d); }
     if(b.newPassword!==undefined){ const a=await rl(env,"pw:"+user,5,900); if(!a.ok) return tooMany(a);
       if(rec.hash!=="!"&&!(await checkPw(String(b.oldPassword||""),rec))) return J({ok:false,error:"Current password is wrong"},400);
       const pp=pwProblem(String(b.newPassword),user); if(pp) return J({ok:false,error:pp},400); Object.assign(rec,await makePw(String(b.newPassword))); await revokeAll(env,user,ses.h); }
